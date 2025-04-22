@@ -141,7 +141,8 @@ from verl.utils.torch_functional import masked_mean
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty='kl'):
     responses = data.batch['responses']
     response_length = responses.size(1)
-    token_level_scores = data.batch['token_level_scores']
+    rewards = data.batch['rewards']
+    print("token_level_scores", rewards.shape)
     batch_size = data.batch.batch_size[0]
     attention_mask = data.batch['attention_mask']
     response_mask = attention_mask[:, -response_length:]
@@ -153,7 +154,8 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     kld = kld * response_mask
     beta = kl_ctrl.value
 
-    token_level_rewards = token_level_scores - beta * kld
+    print("kld", kld.shape)
+    token_level_rewards = rewards - beta * kld
 
     current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average over sequence
     current_kl = torch.mean(current_kl, dim=0).item()
@@ -192,8 +194,8 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             values=data.batch['values'],
             response_mask=data.batch['response_mask'],
             token_gamma=gamma,
-            step_gamma=gamma, # TODO: fix config
-            dones=data.batch['dones'], # TODO: add dones to data
+            step_gamma=gamma, # TODO: query step gamma from config
+            dones=data.batch['done'], 
             lam=lam)
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
@@ -911,34 +913,10 @@ class RayPPOTrainer(object):
                     # padding is not needed for position_ids
                     batch_len = obs['attention_mask'].sum(dim=-1)
                     position_ids = [np.arange(seq_len) for seq_len in batch_len]
+                    # TODO: accelerate this
                     position_ids = torch.tensor([np.pad(pos, (max_seq_len-len(pos), 0), 'constant', constant_values=0) for pos in position_ids])
                     obs["position_ids"] = position_ids.to(input_ids.device)
                     obs_data = DataProto.from_single_dict(obs)
-                    
-                    # # insert data into batch
-                    # batch.insert(
-                    #     obs_data,
-                    #     start_idx = time_step * self.config.envs.n_rollouts,
-                    #     end_idx = (time_step + 1) * self.config.envs.n_rollouts,
-                    # )
-                    
-                    # if 'multi_modal_inputs' in batch.non_tensor_batch.keys():
-                    #     gen_batch = batch.query(
-                    #         start_idx = time_step * self.config.envs.n_rollouts,
-                    #         end_idx = (time_step + 1) * self.config.envs.n_rollouts,
-                    #         batch_keys=['input_ids', 'attention_mask', 'position_ids'],
-                    #         non_tensor_batch_keys=['raw_prompt_ids', 'multi_modal_data', 'multi_modal_inputs'],
-                    #     )
-                    # else:
-                    #     gen_batch = batch.query(
-                    #         start_idx = time_step * self.config.envs.n_rollouts,
-                    #         end_idx = (time_step + 1) * self.config.envs.n_rollouts,
-                    #         batch_keys=['input_ids', 'attention_mask', 'position_ids'],
-                    #         # non_tensor_batch_keys=['raw_prompt_ids'], # TODO: add this line back
-                    #     )
-                        
-                    # print("gen_batch keys: ", gen_batch.batch)
-                    # print("="*30)
                     
                     tensors = {
                         'input_ids': input_ids,
@@ -964,7 +942,6 @@ class RayPPOTrainer(object):
                     
                     gen_batch_output.batch["done"] = done # TODO: check correctness
                     gen_batch_output.batch["reward"] = reward
-                    # gen_batch_output.batch["input_ids"] = gen_batch_output.batch["input_ids"][:,:max_seq_len] # TODO: remove this line
                     
                     batch.insert(
                         gen_batch_output,
@@ -1029,30 +1006,30 @@ class RayPPOTrainer(object):
                         batch = batch.union(values)
 
                 with _timer('adv', timing_raw):
-                    # compute scores. Support both model and function-based.
-                    # We first compute the scores using reward model. Then, we call reward_fn to combine
-                    # the results from reward model and rule-based results.
-                    if self.use_rm:
-                        # we first compute reward model score
-                        reward_tensor = self.rm_wg.compute_rm_score(batch)
-                        batch = batch.union(reward_tensor)
+                    # # compute scores. Support both model and function-based.
+                    # # We first compute the scores using reward model. Then, we call reward_fn to combine
+                    # # the results from reward model and rule-based results.
+                    # if self.use_rm:
+                    #     # we first compute reward model score
+                    #     reward_tensor = self.rm_wg.compute_rm_score(batch)
+                    #     batch = batch.union(reward_tensor)
 
-                    # we combine with rule-based rm
-                    reward_extra_infos_dict: dict[str, list]
-                    try:
-                        reward_result = self.reward_fn(batch, return_dict=True)
-                        reward_tensor = reward_result['reward_tensor']
-                        reward_extra_infos_dict = reward_result['reward_extra_info']
-                    except Exception as e:
-                        print(f'Error in reward_fn: {e}')
-                        reward_tensor = self.reward_fn(batch)
-                        reward_extra_infos_dict = {}
+                    # # we combine with rule-based rm
+                    # reward_extra_infos_dict: dict[str, list]
+                    # try:
+                    #     reward_result = self.reward_fn(batch, return_dict=True)
+                    #     reward_tensor = reward_result['reward_tensor']
+                    #     reward_extra_infos_dict = reward_result['reward_extra_info']
+                    # except Exception as e:
+                    #     print(f'Error in reward_fn: {e}')
+                    #     reward_tensor = self.reward_fn(batch)
+                    #     reward_extra_infos_dict = {}
 
-                    batch.batch['token_level_scores'] = reward_tensor
+                    # batch.batch['token_level_scores'] = reward_tensor
 
-                    print(f'{list(reward_extra_infos_dict.keys())=}')
-                    if reward_extra_infos_dict:
-                        batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                    # print(f'{list(reward_extra_infos_dict.keys())=}')
+                    # if reward_extra_infos_dict:
+                    #     batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
                     # compute rewards. apply_kl_penalty if available
                     if self.config.algorithm.use_kl_in_reward:
@@ -1061,8 +1038,10 @@ class RayPPOTrainer(object):
                                                                 kl_penalty=self.config.algorithm.kl_penalty)
                         metrics.update(kl_metrics)
                     else:
-                        batch.batch['token_level_rewards'] = batch.batch['token_level_scores']
-
+                        batch.batch['token_level_rewards'] = torch.zeros_like(batch.batch['response_mask'])
+                        batch.batch['token_level_rewards'][:, -1] = batch.batch['reward'] # TODO: put reward at the end of the sequence, not index=-1
+                        batch.batch['token_level_scores'] = batch.batch['token_level_rewards'].clone() 
+                    
                     # compute advantages, executed on the driver process
                     batch = compute_advantage(batch,
                                                 adv_estimator=self.config.algorithm.adv_estimator,

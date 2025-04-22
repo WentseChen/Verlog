@@ -89,7 +89,7 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
     with torch.no_grad():
         lastgaelam = 0
         advantages_reversed = []
-        batch_len, gen_len = token_level_rewards
+        batch_len, gen_len = token_level_rewards.shape
         
         lastgaelam = 0
         all_advantages_reversed = []
@@ -98,17 +98,15 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
                 lastgaelam = 0
             advantages_reversed = []
             for token_t in reversed(range(gen_len)):
-                if response_mask[env_t, token_t] == 0:
-                    advantages_reversed.append(0.0)
-                    continue
                 gamma = step_gamma if token_t == gen_len - 1 else token_gamma
-                nextvalues = values[env_step, t + 1] if t < gen_len - 1 else 0.0
-                delta = token_level_rewards[env_step, t] + gamma * nextvalues - values[env_step, t]
+                nextvalues = values[env_t, token_t+1] if token_t < gen_len - 1 else 0.0
+                delta = token_level_rewards[env_t, token_t] + gamma * nextvalues - values[env_t, token_t]
                 lastgaelam = delta + gamma * lam * lastgaelam
                 advantages_reversed.append(lastgaelam)
             all_advantages_reversed.append(advantages_reversed[::-1])
             
-        advantages = torch.stack(all_advantages_reversed[::-1], dim=1)
+        all_advantages = all_advantages_reversed[::-1]
+        advantages = torch.tensor(all_advantages, device=token_level_rewards.device)
 
         returns = advantages + values
         advantages = verl_F.masked_whiten(advantages, response_mask)
