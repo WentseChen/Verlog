@@ -64,7 +64,7 @@ def get_kl_controller(kl_ctrl):
 
 
 def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torch.Tensor, response_mask: torch.Tensor,
-                                 gamma: torch.Tensor, lam: torch.Tensor):
+                                 token_gamma: torch.Tensor, step_gamma: torch.Tensor, dones: torch.Tensor, lam: torch.Tensor):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
     Args:
@@ -89,14 +89,26 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
     with torch.no_grad():
         lastgaelam = 0
         advantages_reversed = []
-        gen_len = token_level_rewards.shape[-1]
-
-        for t in reversed(range(gen_len)):
-            nextvalues = values[:, t + 1] if t < gen_len - 1 else 0.0
-            delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
-            lastgaelam = delta + gamma * lam * lastgaelam
-            advantages_reversed.append(lastgaelam)
-        advantages = torch.stack(advantages_reversed[::-1], dim=1)
+        batch_len, gen_len = token_level_rewards
+        
+        lastgaelam = 0
+        all_advantages_reversed = []
+        for env_t in reversed(range(batch_len)):
+            if dones[env_t] == 1:
+                lastgaelam = 0
+            advantages_reversed = []
+            for token_t in reversed(range(gen_len)):
+                if response_mask[env_t, token_t] == 0:
+                    advantages_reversed.append(0.0)
+                    continue
+                gamma = step_gamma if token_t == gen_len - 1 else token_gamma
+                nextvalues = values[env_step, t + 1] if t < gen_len - 1 else 0.0
+                delta = token_level_rewards[env_step, t] + gamma * nextvalues - values[env_step, t]
+                lastgaelam = delta + gamma * lam * lastgaelam
+                advantages_reversed.append(lastgaelam)
+            all_advantages_reversed.append(advantages_reversed[::-1])
+            
+        advantages = torch.stack(all_advantages_reversed[::-1], dim=1)
 
         returns = advantages + values
         advantages = verl_F.masked_whiten(advantages, response_mask)
