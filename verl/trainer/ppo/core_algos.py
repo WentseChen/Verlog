@@ -89,27 +89,37 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
     with torch.no_grad():
         lastgaelam = 0
         advantages_reversed = []
-        batch_len, gen_len = token_level_rewards.shape
+        
+        
+        _, gen_len = values.shape        
+        n_rollouts = 2
+        batch_values = values.reshape(-1, n_rollouts, gen_len)
+        batch_rewards = token_level_rewards.reshape(-1, n_rollouts, gen_len)
+        batch_dones = dones.reshape(-1, n_rollouts)
+        
+        episode_len, _, gen_len = batch_values.shape
         
         lastgaelam = 0
         all_advantages_reversed = []
-        for env_t in reversed(range(batch_len)):
-            if dones[env_t] == 1:
-                lastgaelam = 0
+        for env_t in reversed(range(episode_len)):
+            lastgaelam = batch_dones[env_t] * lastgaelam
             advantages_reversed = []
             for token_t in reversed(range(gen_len)):
                 gamma = step_gamma if token_t == gen_len - 1 else token_gamma
-                nextvalues = values[env_t, token_t+1] if token_t < gen_len - 1 else 0.0
-                delta = token_level_rewards[env_t, token_t] + gamma * nextvalues - values[env_t, token_t]
+                nextvalues = batch_values[env_t, :, token_t+1] if token_t < gen_len - 1 else 0.0
+                delta = batch_rewards[env_t, :, token_t] + gamma * nextvalues - batch_values[env_t, :, token_t]
                 lastgaelam = delta + gamma * lam * lastgaelam
                 advantages_reversed.append(lastgaelam)
-            all_advantages_reversed.append(advantages_reversed[::-1])
-            
-        all_advantages = all_advantages_reversed[::-1]
-        advantages = torch.tensor(all_advantages, device=token_level_rewards.device)
-
+            advantages_reversed = torch.stack(advantages_reversed, dim=-1)
+            step_advantage = torch.flip(advantages_reversed, dims=[-1])
+            all_advantages_reversed.append(step_advantage)
+        all_advantages_reversed = torch.stack(all_advantages_reversed, dim=0)
+        all_advantages = torch.flip(all_advantages_reversed, dims=[0])
+        
+        advantages = all_advantages.reshape(-1, gen_len)
         returns = advantages + values
         advantages = verl_F.masked_whiten(advantages, response_mask)
+        
     return advantages, returns
 
 
