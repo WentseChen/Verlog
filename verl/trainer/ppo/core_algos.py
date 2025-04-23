@@ -102,7 +102,7 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
         lastgaelam = 0
         all_advantages_reversed = []
         for env_t in reversed(range(episode_len)):
-            lastgaelam = batch_dones[env_t] * lastgaelam
+            lastgaelam = (1 - batch_dones[env_t]) * lastgaelam
             advantages_reversed = []
             for token_t in reversed(range(gen_len)):
                 gamma = step_gamma if token_t == gen_len - 1 else token_gamma

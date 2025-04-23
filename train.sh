@@ -25,4 +25,4 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.nnodes=1 \
  trainer.save_freq=1000000000 \
  trainer.test_freq=10 \
- trainer.total_epochs=15 2>&1 | tee verl_demo.log
+ trainer.total_epochs=1000 2>&1 | tee verl_demo.log
