@@ -63,8 +63,16 @@ def get_kl_controller(kl_ctrl):
         raise NotImplementedError
 
 
-def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torch.Tensor, response_mask: torch.Tensor,
-                                 gamma: torch.Tensor, lam: torch.Tensor):
+def compute_gae_advantage_return(
+        token_level_rewards: torch.Tensor, 
+        values: torch.Tensor,
+        response_mask: torch.Tensor,
+        token_gamma: torch.Tensor, 
+        step_gamma: torch.Tensor, 
+        dones: torch.Tensor, 
+        lam: torch.Tensor, 
+        n_rollouts: int = 2
+    ):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
     Args:
@@ -74,10 +82,16 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
             shape: (bs, response_length)
         response_mask: `(torch.Tensor)`
             shape: (bs, response_length). [EOS] mask. The token after [EOS] have mask zero.
-        gamma: `(float)`
-            discounted factor used in RL
+        token_gamma: `(float)`
+            discounted factor used in RL (on sequence dimension)
+        step_gamma: `(float)`
+            discounted factor used in RL (on episode dimension)
+        dones: `(torch.Tensor)`
+            shape: (bs, response_length). The episode ends at the step where the value is 1.0.
         lam: `(float)`
             lambda value when computing Generalized Advantage Estimation (https://arxiv.org/abs/1506.02438)
+        n_rollouts: `(int)`
+            number of rollouts in the batch. The batch size is `episode_len * n_rollouts`.
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -89,17 +103,36 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
     with torch.no_grad():
         lastgaelam = 0
         advantages_reversed = []
-        gen_len = token_level_rewards.shape[-1]
-
-        for t in reversed(range(gen_len)):
-            nextvalues = values[:, t + 1] if t < gen_len - 1 else 0.0
-            delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
-            lastgaelam = delta + gamma * lam * lastgaelam
-            advantages_reversed.append(lastgaelam)
-        advantages = torch.stack(advantages_reversed[::-1], dim=1)
-
+        
+        
+        _, gen_len = values.shape        
+        batch_values = values.reshape(-1, n_rollouts, gen_len)
+        batch_rewards = token_level_rewards.reshape(-1, n_rollouts, gen_len)
+        batch_dones = dones.reshape(-1, n_rollouts)
+        
+        episode_len, _, gen_len = batch_values.shape
+        
+        lastgaelam = 0
+        all_advantages_reversed = []
+        for env_t in reversed(range(episode_len)):
+            lastgaelam = (1 - batch_dones[env_t]) * lastgaelam
+            advantages_reversed = []
+            for token_t in reversed(range(gen_len)):
+                gamma = step_gamma if token_t == gen_len - 1 else token_gamma
+                nextvalues = batch_values[env_t, :, token_t+1] if token_t < gen_len - 1 else 0.0
+                delta = batch_rewards[env_t, :, token_t] + gamma * nextvalues - batch_values[env_t, :, token_t]
+                lastgaelam = delta + gamma * lam * lastgaelam
+                advantages_reversed.append(lastgaelam)
+            advantages_reversed = torch.stack(advantages_reversed, dim=-1)
+            step_advantage = torch.flip(advantages_reversed, dims=[-1])
+            all_advantages_reversed.append(step_advantage)
+        all_advantages_reversed = torch.stack(all_advantages_reversed, dim=0)
+        all_advantages = torch.flip(all_advantages_reversed, dims=[0])
+        
+        advantages = all_advantages.reshape(-1, gen_len)
         returns = advantages + values
         advantages = verl_F.masked_whiten(advantages, response_mask)
+        
     return advantages, returns
 
 

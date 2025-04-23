@@ -73,6 +73,10 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         return_diff_var = torch.var(valid_returns - valid_values)
         return_var = torch.var(valid_returns)
 
+    # TODO: remove this
+    sequence_score = sequence_score.type(advantages.dtype)
+    sequence_reward = sequence_reward.type(advantages.dtype)
+
     metrics = {
         # score
         'critic/score/mean':
