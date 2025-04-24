@@ -49,7 +49,7 @@ You always have to output one of the above actions at a time and no other text. 
         """Sanitize the final answer, keeping only alphabetic characters.
 
         Args:
-            answer (LLMResponse): The response from the LLM.
+            answer (string): The response from the LLM.
 
         Returns:
             LLMResponse: The sanitized response.

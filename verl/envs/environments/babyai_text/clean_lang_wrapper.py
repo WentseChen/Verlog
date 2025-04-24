@@ -69,7 +69,7 @@ class BabyAITextCleanLangWrapper(gym.Wrapper):
         prompt, image = self.get_prompt(obs, infos)
         obs["text"] = {"long_term_context": prompt, "short_term_context": ""}
         obs["image"] = image
-        return obs, reward, terminated, truncated, infos
+        return obs, reward*1.0, terminated, truncated, infos
 
     def get_stats(self):
         # No special stats tracking implemented for now

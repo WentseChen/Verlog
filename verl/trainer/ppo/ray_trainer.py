@@ -876,7 +876,7 @@ class RayPPOTrainer(object):
         batch_dict["attention_mask"] = torch.cat([batch_dict["attention_mask"], batch_dict["attention_mask"][:,:256]], dim=1)
         batch_dict["position_ids"] = torch.cat([batch_dict["position_ids"], batch_dict["position_ids"][:,:256]], dim=1)
         
-        batch_dict["reward"] = torch.zeros_like(batch_dict["input_ids"][:,0])
+        batch_dict["reward"] = torch.zeros_like(batch_dict["input_ids"][:,0], dtype=torch.float64)
         batch_dict["done"] = torch.zeros_like(batch_dict["input_ids"][:,0])
         batch_dict["responses"] = torch.zeros_like(batch_dict["input_ids"][:,:256]) # TODO: fix this
         
@@ -1011,9 +1011,9 @@ class RayPPOTrainer(object):
                                                                     kl_penalty=self.config.algorithm.kl_penalty)
                             metrics.update(kl_metrics)
                         else:
-                            batch.batch['token_level_rewards'] = torch.zeros_like(batch.batch['response_mask'])
+                            batch.batch['token_level_rewards'] = torch.zeros_like(batch.batch['response_mask'], dtype=torch.float64)
                             seq_len = batch.batch['response_mask'].sum(-1) - 1
-                            indices = torch.arange(batch_size, device=seq_len.device)
+                            indices = torch.arange(batch.batch['response_mask'].shape[0], device=seq_len.device)
                             batch.batch['token_level_rewards'][indices, seq_len] = batch.batch['reward']
                             batch.batch['token_level_scores'] = batch.batch['token_level_rewards'].clone() 
                         
@@ -1039,7 +1039,7 @@ class RayPPOTrainer(object):
                             critic_output = self.critic_wg.update_critic(batch4train)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
                         metrics.update(critic_output_metrics)
-
+                        
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor

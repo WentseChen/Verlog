@@ -1,14 +1,12 @@
 import copy
 import re
 
-from balrog.agents.base import BaseAgent
-from balrog.client import LLMClientWrapper
+from verl.envs.captioners.base import BaseCaptioner
 
-
-class ChainOfThoughtAgent(BaseAgent):
+class COTCaptioner(BaseCaptioner):
     """An agent that performs actions using a chain-of-thought reasoning process."""
 
-    def __init__(self, client_factory: LLMClientWrapper, prompt_builder, config):
+    def __init__(self, prompt_builder):
         """Initialize the ChainOfThoughtAgent with a client, prompt builder, and configuration.
 
         Args:
@@ -16,10 +14,9 @@ class ChainOfThoughtAgent(BaseAgent):
             prompt_builder (PromptBuilder): Object to build prompts for the agent.
             config: Configuration object containing settings for the agent.
         """
-        super().__init__(client_factory, prompt_builder)
-        self.remember_cot = config.agent.remember_cot
+        super().__init__(prompt_builder)
 
-    def act(self, obs, prev_action=None):
+    def get_obs(self, obs, prev_action=None):
         """Generate the next action using chain-of-thought reasoning based on the current observation.
 
         Args:
@@ -44,15 +41,24 @@ Finally, provide a single output action at the end of the message in the form of
 
         messages[-1].content += "\n\n" + cot_instructions
 
-        # Generate the CoT reasoning
-        cot_reasoning = self.client.generate(messages)
+        # TODO: remove the transformation
+        new_messages = []
+        for message in messages:
+            role = message.role
+            content = message.content
+            new_messages.append({"role": role, "content": content})
 
-        # Extract the final answer from the CoT reasoning
-        final_answer = self._extract_final_answer(cot_reasoning)
+        return new_messages
+    
+        # # Generate the CoT reasoning
+        # cot_reasoning = self.client.generate(messages)
 
-        return final_answer
+        # # Extract the final answer from the CoT reasoning
+        # final_answer = self._extract_final_answer(cot_reasoning)
 
-    def _extract_final_answer(self, reasoning):
+        # return final_answer
+
+    def get_action(self, reasoning):
         """Extract the final action from the chain-of-thought reasoning response.
 
         Args:
@@ -66,8 +72,8 @@ Finally, provide a single output action at the end of the message in the form of
             return re.sub(r"[^a-zA-Z\s:]", "", input_string)
 
         answer = copy.deepcopy(reasoning)
-        self.prompt_builder.update_reasoning(reasoning.completion)
-        answer = answer._replace(reasoning=answer.completion)
-        answer = answer._replace(completion=filter_letters(answer.completion).split("ACTION:")[-1].strip())
+        self.prompt_builder.update_reasoning(reasoning)
+        answer = filter_letters(answer)
+        answer = answer.split("ACTION:")[-1].strip()
 
         return answer

@@ -226,8 +226,9 @@ envs:
   task: BabyAI-MixedTrainLocal-v0/goto
   captioner:
     type: naive
-    max_text_history: 1
+    max_text_history: 2
     max_cot_history: 1
     max_image_history: 0
   babyai_kwargs:
-    num_dists: 0    
+    num_dists: 0
+    # max_steps: 20
