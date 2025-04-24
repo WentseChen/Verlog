@@ -1,5 +1,4 @@
 from ..prompt_builder import create_prompt_builder
-from .naive import NaiveCaptioner
 
 
 def make_captioner(config):
@@ -14,6 +13,10 @@ def make_captioner(config):
     prompt_builder = create_prompt_builder(config.envs.captioner)
 
     if config.envs.captioner.type == "naive":
+        from .naive import NaiveCaptioner
         return NaiveCaptioner(prompt_builder)
+    elif config.envs.captioner.type == "cot":
+        from .cot import COTCaptioner
+        return COTCaptioner(prompt_builder)
     else:
         raise ValueError(f"Unknown captioner type: {config.captioner.type}")

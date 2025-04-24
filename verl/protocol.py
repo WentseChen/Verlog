@@ -84,14 +84,18 @@ def union_tensor_dict(tensor_dict1: TensorDict, tensor_dict2: TensorDict) -> Ten
 
     return tensor_dict1
 
-def insert_tensor_dict(tensor_dict1: TensorDict, tensor_dict2: TensorDict, start_idx: int, end_idx: int) -> TensorDict:
+def insert_tensor_dict(tensor_dict1: TensorDict, tensor_dict2: TensorDict, start_idx: int, end_idx: int, diff_size: bool = False) -> TensorDict:
     """Insert tensor_dict2 into tensor_dict1 at the specified start and end indices."""
     assert end_idx - start_idx == tensor_dict2.batch_size[0], \
-        f'Two tensor dict must have identical batch size. Got {end_idx - start_idx} and {tensor_dict2.batch_size[0]}'
+        f'The size of tensor_dict2 must be equal to end_idx - start_idx. Got {tensor_dict2.batch_size[0]} and {end_idx - start_idx}'
     
     for key in tensor_dict2.keys():
         if key in tensor_dict1.keys():
-            tensor_dict1[key][start_idx:end_idx] = tensor_dict2[key]
+            if diff_size:
+                last_dim_size = tensor_dict2[key].shape[-1]
+                tensor_dict1[key][start_idx:end_idx,:last_dim_size] = tensor_dict2[key]
+            else:
+                tensor_dict1[key][start_idx:end_idx] = tensor_dict2[key]
     return tensor_dict1
 
 
@@ -107,10 +111,13 @@ def union_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str
 
     return tensor_dict1
 
-def insert_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str, np.ndarray], start_idx: int, end_idx: int) -> dict[str, np.ndarray]:
+def insert_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str, np.ndarray], start_idx: int, end_idx: int, diff_size: bool = False) -> dict[str, np.ndarray]:
     for key, val in tensor_dict2.items():
-        tensor_dict1[key][start_idx:end_idx] = val
-
+        if diff_size:
+            last_dim_size = tensor_dict2[key].shape[-1]
+            tensor_dict1[key][start_idx:end_idx,:last_dim_size] = val
+        else:
+            tensor_dict1[key][start_idx:end_idx] = val
     return tensor_dict1
 
 def list_of_dict_to_dict_of_list(list_of_dict: list[dict]):
@@ -760,7 +767,7 @@ class DataProto:
             meta_info[key] = all_meta_info[start_idx:end_idx]
         return DataProto.from_dict(tensors=tensors, non_tensors=non_tensors, meta_info=meta_info)
 
-    def insert(self, other: 'DataProto', start_idx: int, end_idx: int) -> 'DataProto':
+    def insert(self, other: 'DataProto', start_idx: int, end_idx: int, diff_size: bool = False) -> 'DataProto':
         """Union with another DataProto. Union batch and meta_info separately.
         Throw an error if
 
@@ -774,8 +781,8 @@ class DataProto:
         Returns:
             DataProto: the DataProto after union
         """
-        self.batch = insert_tensor_dict(self.batch, other.batch, start_idx, end_idx)
-        self.non_tensor_batch = insert_numpy_dict(self.non_tensor_batch, other.non_tensor_batch, start_idx, end_idx)
+        self.batch = insert_tensor_dict(self.batch, other.batch, start_idx, end_idx, diff_size)
+        self.non_tensor_batch = insert_numpy_dict(self.non_tensor_batch, other.non_tensor_batch, start_idx, end_idx, diff_size)
         # self.meta_info = union_two_dict(self.meta_info, other.meta_info) # TODO: add this
         return self
 

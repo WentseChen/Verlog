@@ -196,8 +196,7 @@ algorithm:
     target_kl: 0.1
 
 trainer:
-  episode_length: 15
-  balance_batch: False
+  balance_batch: False # TODO: add balance_batch
   total_epochs: 30
   total_training_steps: null
   project_name: verl_examples
@@ -222,14 +221,14 @@ trainer:
   ray_wait_register_center_timeout: 300
 
 envs:
-  n_rollouts: 2
+  n_rollouts: 16
   env_name: babyai
   task: BabyAI-MixedTrainLocal-v0/goto
   captioner:
     type: naive
-    max_history: 5
-    max_text_history: 1
+    max_text_history: 2
     max_cot_history: 1
     max_image_history: 0
   babyai_kwargs:
-    num_dists: 0    
+    num_dists: 0
+    # max_steps: 20

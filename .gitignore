@@ -127,3 +127,4 @@ logs
 log
 outputs
 
+*.sbatch
