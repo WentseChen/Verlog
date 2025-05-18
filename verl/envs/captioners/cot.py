@@ -26,8 +26,8 @@ class COTCaptioner(BaseCaptioner):
         Returns:
             LLMResponse: The response containing the final selected action.
         """
-        if prev_action:
-            self.prompt_builder.update_action(prev_action)
+        # if prev_action:
+        #     self.prompt_builder.update_action(prev_action)
 
         self.prompt_builder.update_observation(obs)
 
@@ -35,7 +35,7 @@ class COTCaptioner(BaseCaptioner):
 
         # Add CoT-specific instructions to the prompt
         cot_instructions = """
-First think about what's the best course of action step by step.
+First think about what's the best course of action step by step (in free form).
 Finally, provide a single output action at the end of the message in the form of: ACTION: <action>
         """.strip()
 
@@ -50,30 +50,6 @@ Finally, provide a single output action at the end of the message in the form of
 
         return new_messages
     
-        # # Generate the CoT reasoning
-        # cot_reasoning = self.client.generate(messages)
-
-        # # Extract the final answer from the CoT reasoning
-        # final_answer = self._extract_final_answer(cot_reasoning)
-
-        # return final_answer
-
-    def get_action(self, reasoning):
-        """Extract the final action from the chain-of-thought reasoning response.
-
-        Args:
-            reasoning (LLMResponse): The response containing CoT reasoning and action.
-
-        Returns:
-            LLMResponse: The response with the extracted final action.
-        """
-
-        def filter_letters(input_string):
-            return re.sub(r"[^a-zA-Z\s:]", "", input_string)
-
-        answer = copy.deepcopy(reasoning)
+    def update_action(self, reasoning, prev_action):
         self.prompt_builder.update_reasoning(reasoning)
-        answer = filter_letters(answer)
-        answer = answer.split("ACTION:")[-1].strip()
-
-        return answer
+        self.prompt_builder.update_action(prev_action)

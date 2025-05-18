@@ -102,9 +102,6 @@ def compute_gae_advantage_return(
 
     """
     with torch.no_grad():
-        lastgaelam = 0
-        advantages_reversed = []
-        
         
         _, gen_len = values.shape        
         batch_values = values.reshape(-1, n_rollouts, gen_len)
@@ -114,21 +111,32 @@ def compute_gae_advantage_return(
         
         episode_len, _, gen_len = batch_values.shape
         
-        lastgaelam = 0
+        gae = 0
         all_advantages_reversed = [torch.zeros_like(batch_values[0])]
         next_values = batch_values[episode_len-1, :, 0]
         for env_t in reversed(range(episode_len - 1)):
-            lastgaelam = (1 - batch_dones[env_t]) * lastgaelam
             advantages_reversed = []
+            
+            gamma = step_gamma
+            lam = step_lam
+            done_t = batch_dones[env_t] # done=1, not done=0
+            gae = (1 - done_t) * gae
+            
             for token_t in reversed(range(gen_len)):
-                gamma = step_gamma if token_t == gen_len - 1 else token_gamma
-                lam = step_lam if token_t == gen_len - 1 else token_lam
-                delta = batch_rewards[env_t, :, token_t] + gamma * next_values * (1 - batch_dones[env_t]) - batch_values[env_t, :, token_t]
-                update = batch_response_mask[env_t, :, token_t]
-                lastgaelam = (delta + gamma * lam * lastgaelam) * update + lastgaelam * (1 - update)
-                advantages_reversed.append(lastgaelam * update)
-                next_values = batch_values[env_t, :, token_t] * update + next_values * (1 - update)
-                batch_dones[env_t] = 0
+                
+                rew_t = batch_rewards[env_t, :, token_t]
+                v_t = batch_values[env_t, :, token_t]
+                update_t = batch_response_mask[env_t, :, token_t] # need_update=1, not_update=0
+                
+                delta = rew_t + gamma * next_values * (1 - done_t) - v_t
+                gae = (delta + gamma * lam * gae) * update_t + gae * (1 - update_t)
+                advantages_reversed.append(gae * update_t)
+                
+                next_values = v_t * update_t + next_values * (1 - update_t)
+                done_t = done_t * (1 - update_t) # only mask the last token in the sequence (env done)
+                gamma = token_gamma * update_t + step_gamma * (1 - update_t) # use step gamma for the last token
+                lam = token_lam * update_t + step_lam * (1 - update_t) # use step lam for the last token
+                
             advantages_reversed = torch.stack(advantages_reversed, dim=-1)
             step_advantage = torch.flip(advantages_reversed, dims=[-1])
             all_advantages_reversed.append(step_advantage)

@@ -1,6 +1,6 @@
 data:
   tokenizer: null
-  train_files: ~/data/rlhf/gsm8k/train.parquet
+  train_files: ~/data/rlhf/gsm8k/test.parquet
   val_files: ~/data/rlhf/gsm8k/test.parquet
   prompt_key: prompt
   reward_fn_key: data_source
@@ -184,8 +184,10 @@ custom_reward_function:
   name: compute_score
 
 algorithm:
-  gamma: 1.0
-  lam: 1.0
+  step_gamma: 1.0
+  step_lam: 1.0
+  token_gamma: 1.0
+  token_lam: 1.0
   adv_estimator: gae
   use_kl_in_reward: False
   kl_penalty: kl  # how to estimate kl divergence
@@ -202,7 +204,7 @@ trainer:
   project_name: verl_examples
   experiment_name: gsm8k
   logger: [ 'console', 'wandb' ]
-  log_val_generations: 0
+  log_val_generations: 1
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
@@ -224,6 +226,7 @@ envs:
   n_rollouts: 16
   env_name: babyai
   task: BabyAI-MixedTrainLocal-v0/goto
+  format_penalty: 0.0
   captioner:
     type: naive
     max_text_history: 2
@@ -231,4 +234,4 @@ envs:
     max_image_history: 0
   babyai_kwargs:
     num_dists: 0
-    # max_steps: 20
+    # max_steps: 64

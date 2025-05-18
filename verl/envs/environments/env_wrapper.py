@@ -90,3 +90,6 @@ class EnvWrapper(gym.Wrapper):
 
     def get_stats(self):
         return self.env.get_stats()
+    
+    def extract_action(self, action):
+        return self.env.extract_action(action)

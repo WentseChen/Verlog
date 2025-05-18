@@ -70,29 +70,39 @@ def worker(remote, parent_remote, env_fn_wrapper, captioner_fn_wrapper):
     captioner = captioner_fn_wrapper.x()
     while True:
         cmd, data = remote.recv()
+        
         if cmd == 'step':
-            action = captioner.get_action(data)
+            reasoning, action = env.extract_action(data)
             env_obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
-            obs = captioner.get_obs(env_obs, action)
+            captioner.update_action(reasoning, action)
+            obs = captioner.get_obs(env_obs)
             if done:
+                captioner.reset()
                 env_obs, info = env.reset()
+                # TODO: move this part of code to the proper place ====
+                instructions = None
+                if "mission" in env_obs: # env_name == "babyai":
+                    instructions = env_obs["mission"]
+                inst_prompt = env.get_instruction_prompt(instructions=instructions)
+                captioner.prompt_builder.update_instruction_prompt(inst_prompt)
+                # =====================================================
                 obs = captioner.get_obs(env_obs)
             remote.send((obs, reward, terminated, truncated, info))
+            
         elif cmd == 'reset':
             captioner.reset()
             env_obs, info = env.reset()
-            
-            # TODO: move this part of code to the proper place
+            # TODO: move this part of code to the proper place ====
             instructions = None
             if "mission" in env_obs: # env_name == "babyai":
                 instructions = env_obs["mission"]
             inst_prompt = env.get_instruction_prompt(instructions=instructions)
             captioner.prompt_builder.update_instruction_prompt(inst_prompt)
-
+            # =====================================================
             obs = captioner.get_obs(env_obs)
-            
             remote.send((obs, info))
+            
         elif cmd == 'close':
             env.close()
             remote.close()

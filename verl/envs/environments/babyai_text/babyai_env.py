@@ -42,6 +42,6 @@ def make_babyai_env(env_name, task, config, render_mode: Optional[str] = None):
             if env.unwrapped.action_kinds[0].replace(" ", "_") == goal:
                 break
 
-    env = BabyAITextCleanLangWrapper(env, **config.envs.babyai_kwargs)
+    env = BabyAITextCleanLangWrapper(env, **config.envs)
 
     return env
