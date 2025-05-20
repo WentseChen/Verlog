@@ -72,10 +72,10 @@ def worker(remote, parent_remote, env_fn_wrapper, captioner_fn_wrapper):
         cmd, data = remote.recv()
         
         if cmd == 'step':
-            reasoning, action = env.extract_action(data)
+            reasoning, action, valid_action = env.extract_action(data)
             env_obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
-            captioner.update_action(reasoning, action)
+            captioner.update_action(reasoning, valid_action)
             obs = captioner.get_obs(env_obs)
             if done:
                 captioner.reset()

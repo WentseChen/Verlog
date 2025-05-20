@@ -36,7 +36,7 @@ class COTCaptioner(BaseCaptioner):
         # Add CoT-specific instructions to the prompt
         cot_instructions = """
 First think about what's the best course of action step by step (in free form).
-Finally, provide a single output action at the end of the message in the form of: ACTION: <action>
+Finally, provide a single output action (the action you should take given the current observation) at the end of the message in the form of: ACTION: <action>
         """.strip()
 
         messages[-1].content += "\n\n" + cot_instructions

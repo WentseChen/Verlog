@@ -32,7 +32,7 @@ class HistoryPromptBuilder:
         self.max_image_history = max_image_history
         self.max_history = max(max_text_history, max_image_history)
         self.system_prompt = system_prompt
-        self._events = deque(maxlen=self.max_history * 2)  # Stores observations and actions
+        self._events = deque(maxlen=self.max_history * 2 + 1)  # Stores observations and actions
         self._last_short_term_obs = None  # To store the latest short-term observation
         self.previous_reasoning = None
         self.max_cot_history = max_cot_history
@@ -85,10 +85,10 @@ class HistoryPromptBuilder:
         messages = []
 
         if self.system_prompt and not icl_episodes:
-            messages.append(Message(role="user", content=self.system_prompt))
+            messages.append(Message(role="system", content=self.system_prompt))
 
         # Determine which text observations to include
-        text_needed = self.max_text_history
+        text_needed = self.max_text_history + 1
         for event in reversed(self._events):
             if event["type"] == "observation":
                 if text_needed > 0 and event.get("text") is not None:

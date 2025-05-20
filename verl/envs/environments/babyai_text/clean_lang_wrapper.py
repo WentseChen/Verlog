@@ -79,7 +79,9 @@ class BabyAITextCleanLangWrapper(gym.Wrapper):
             
         action = lower_pred_action
         
-        return reasoning, action
+        valid_action = action if action in self.language_action_space else self.default_action
+        
+        return reasoning, action, valid_action
 
     def step(self, action):
         
