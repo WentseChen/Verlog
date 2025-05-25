@@ -2,8 +2,8 @@ from typing import Optional
 
 import crafter
 
-from balrog.environments.crafter import CrafterLanguageWrapper
-from balrog.environments.wrappers import GymV21CompatibilityV0
+from verl.envs.environments.crafter import CrafterLanguageWrapper
+from verl.envs.environments.wrappers import GymV21CompatibilityV0
 
 
 def make_crafter_env(env_name, task, config, render_mode: Optional[str] = None):

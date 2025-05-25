@@ -235,3 +235,22 @@ envs:
   babyai_kwargs:
     num_dists: 0
     # max_steps: 64
+  babaisai_kwargs: 
+    add_ruleset: True
+  crafter_kwargs:
+    area: [64, 64]              
+    view: [9, 9]            
+    size: [256, 256] # Image size in Crafter
+    reward: True                       
+    seed: null                  
+    max_episode_steps: 2000  
+  minihack_kwargs: 
+    character: "@"
+    max_episode_steps: 100
+    penalty_step: -0.01         
+    penalty_time: 0.0           
+    penalty_mode: constant      
+    savedir: null
+    save_ttyrec_every: 0
+    autopickup: False           
+    skip_more: True

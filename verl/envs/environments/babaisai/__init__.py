@@ -1,4 +1,4 @@
-from balrog.environments.babaisai.base import BabaIsAIWrapper
+from verl.envs.environments.babaisai.base import BabaIsAIWrapper
 
 __all__ = [BabaIsAIWrapper]
 

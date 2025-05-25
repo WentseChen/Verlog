@@ -104,6 +104,9 @@ class GymV21CompatibilityV0(gymnasium.Env[ObsType, ActType]):
         self.spec = getattr(gym_env, "spec", None)
 
         self.gym_env: LegacyV21Env = gym_env
+    
+    def extract_action(self, action):
+        return self.gym_env.extract_action(action)
 
     def __getattr__(self, item: str):
         """Gets an attribute that only exists in the base environments."""

@@ -20,7 +20,7 @@ class CloudpickleWrapper(object):
 
 class VecEnv:
     
-    def __init__(self, config, env_fns, captioner_fns):
+    def __init__(self, env_name, config, env_fns, captioner_fns):
         
         self.config = config
         self.n_rollouts = config.envs.n_rollouts
@@ -31,7 +31,7 @@ class VecEnv:
         for (work_remote, remote, env_fn, captioner_fn) in zip(self.work_remotes, self.remotes, env_fns, captioner_fns):
             p = Process(
                 target=worker,
-                args=(work_remote, remote, CloudpickleWrapper(env_fn), CloudpickleWrapper(captioner_fn)),
+                args=(work_remote, remote, env_name, CloudpickleWrapper(env_fn), CloudpickleWrapper(captioner_fn)),
             )
             p.daemon = True  # if the main process crashes, we should not cause things to hang
             p.start()
@@ -64,7 +64,7 @@ class VecEnv:
         for remote in self.remotes:
             remote.send(('close', None))
         
-def worker(remote, parent_remote, env_fn_wrapper, captioner_fn_wrapper):
+def worker(remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_wrapper):
     parent_remote.close()
     env = env_fn_wrapper.x()
     captioner = captioner_fn_wrapper.x()
@@ -73,7 +73,7 @@ def worker(remote, parent_remote, env_fn_wrapper, captioner_fn_wrapper):
         
         if cmd == 'step':
             reasoning, action, valid_action = env.extract_action(data)
-            env_obs, reward, terminated, truncated, info = env.step(action)
+            env_obs, reward, terminated, truncated, info = env.step(valid_action)
             done = terminated or truncated
             captioner.update_action(reasoning, valid_action)
             obs = captioner.get_obs(env_obs)
@@ -82,7 +82,7 @@ def worker(remote, parent_remote, env_fn_wrapper, captioner_fn_wrapper):
                 env_obs, info = env.reset()
                 # TODO: move this part of code to the proper place ====
                 instructions = None
-                if "mission" in env_obs: # env_name == "babyai":
+                if env_name == "babyai":
                     instructions = env_obs["mission"]
                 inst_prompt = env.get_instruction_prompt(instructions=instructions)
                 captioner.prompt_builder.update_instruction_prompt(inst_prompt)
@@ -95,7 +95,7 @@ def worker(remote, parent_remote, env_fn_wrapper, captioner_fn_wrapper):
             env_obs, info = env.reset()
             # TODO: move this part of code to the proper place ====
             instructions = None
-            if "mission" in env_obs: # env_name == "babyai":
+            if env_name == "babyai":
                 instructions = env_obs["mission"]
             inst_prompt = env.get_instruction_prompt(instructions=instructions)
             captioner.prompt_builder.update_instruction_prompt(inst_prompt)

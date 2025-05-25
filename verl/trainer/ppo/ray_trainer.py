@@ -314,6 +314,7 @@ class RayPPOTrainer(object):
                     return make_captioner(config)
                 return init_captioner
             env = VecEnv(
+                env_name=env_name,
                 config=config,
                 env_fns=[get_env_fn(i) for i in range(config.envs.n_rollouts)],
                 captioner_fns=[get_captioner_fn(i) for i in range(config.envs.n_rollouts)],
@@ -1050,7 +1051,7 @@ class RayPPOTrainer(object):
 
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
-                        (is_last_step or  self.global_steps % self.config.trainer.test_freq == 0):
+                        (is_last_step or self.global_steps % self.config.trainer.test_freq == 0) and (self.global_steps > self.config.trainer.critic_warmup):
                         with _timer('testing', timing_raw):
                             val_metrics: dict = self._validate()
                             if is_last_step:

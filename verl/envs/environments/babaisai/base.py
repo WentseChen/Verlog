@@ -176,7 +176,28 @@ class BabaIsAIWrapper(gym.Wrapper):
         if done:
             self.progression = 1.0 if reward > 0 else 0.0
 
-        return self.textworld_process_obsv(obs), reward, done, info
+        return self.textworld_process_obsv(obs), reward*1.0, done, info
 
     def get_stats(self):
         return {"target_plan": self.target_plan, "progression": self.progression}
+    
+    def extract_action(self, action):
+        
+        reasoning = str(action)
+        
+        if "ACTION:" in action:
+            action = action.split("ACTION:")[-1].strip()
+        elif "action:" in action:
+            action = action.split("action:")[-1].strip()
+        elif "Action" in action:
+            action = action.split("Action")[-1].strip()
+            
+        lower_pred_action = action.lower()
+        
+        lower_pred_action = lower_pred_action.replace("_", " ")
+            
+        action = lower_pred_action
+        
+        valid_action = action if action in self.language_action_space else self.default_action
+        
+        return reasoning, action, valid_action
