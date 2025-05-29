@@ -5,7 +5,7 @@ import gym
 import numpy as np
 from PIL import Image
 
-from balrog.environments import Strings
+from verl.envs.environments import Strings
 
 ACTIONS = [
     "Noop",
@@ -216,6 +216,24 @@ class CrafterLanguageWrapper(gym.Wrapper):
         }
         aug_info["view"] = self.env._view
         return obs, reward, done, aug_info
+    
+    def extract_action(self, action):
+        
+        reasoning = str(action)
+        
+        if "ACTION:" in action:
+            action = action.split("ACTION:")[-1].strip()
+        elif "action:" in action:
+            action = action.split("action:")[-1].strip()
+        elif "Action" in action:
+            action = action.split("Action")[-1].strip()
+            
+        lower_pred_action = action.lower()
+        action = lower_pred_action.title()
+        
+        valid_action = action if action in self.language_action_space else self.default_action
+        
+        return reasoning, action, valid_action
 
     def reset(self):
         self.env.reset()

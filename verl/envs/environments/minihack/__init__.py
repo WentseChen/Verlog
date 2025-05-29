@@ -35,6 +35,7 @@ ACTIONS = {
     "search": "search for hidden doors and passages",
     "zap": "zap a wand",
 }
+all_available_actions = ACTIONS
 
 
 def get_available_actions(env):

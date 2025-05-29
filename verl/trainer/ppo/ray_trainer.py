@@ -314,6 +314,7 @@ class RayPPOTrainer(object):
                     return make_captioner(config)
                 return init_captioner
             env = VecEnv(
+                env_name=env_name,
                 config=config,
                 env_fns=[get_env_fn(i) for i in range(config.envs.n_rollouts)],
                 captioner_fns=[get_captioner_fn(i) for i in range(config.envs.n_rollouts)],
@@ -896,11 +897,8 @@ class RayPPOTrainer(object):
                         input_obs = self.tokenizer(input_obs, return_tensors='pt', padding='max_length', truncation=True, max_length=max_seq_len)
                         input_ids = input_obs['input_ids']
                         attention_mask = input_obs['attention_mask']
-                        batch_seq_len = input_obs['attention_mask'].sum(dim=-1)
-                        position_ids = [np.arange(seq_len) for seq_len in batch_seq_len]
-                        # TODO: accelerate this
-                        position_ids = torch.tensor([np.pad(pos, (max_seq_len-len(pos), 0), 'constant', constant_values=0) for pos in position_ids])
-                        position_ids = position_ids.to(input_ids.device)
+                        position_ids = attention_mask.long().cumsum(-1) - 1
+                        position_ids.masked_fill_(attention_mask == 0, 1)
                         
                         obs_data = {
                             'input_ids': input_ids,
@@ -1039,6 +1037,19 @@ class RayPPOTrainer(object):
                             critic_output = self.critic_wg.update_critic(batch4train)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
                         metrics.update(critic_output_metrics)
+                    
+                    if self.config.trainer.mask_last_turn and self.global_steps < 100:
+                        mask_adv = batch4train.batch["advantages"].reshape(-1, self.config.envs.n_rollouts, batch4train.batch["advantages"].shape[-1])
+                        mask_rew = batch4train.batch["reward"].reshape(-1, self.config.envs.n_rollouts)
+                        for row_id in range(len(mask_rew)-1):
+                            mask_rew[row_id] = mask_rew[row_id] + mask_rew[row_id+1]
+                        for row_id in range(len(mask_rew)-1):
+                            mask_rew[row_id] = mask_rew[row_id] + mask_rew[row_id+1]
+                        for row_id in range(len(mask_rew)-1):
+                            mask_rew[row_id] = mask_rew[row_id] + mask_rew[row_id+1]
+                        mask_rew = (mask_rew==0.) * 1.
+                        mask_rew = mask_rew.reshape([-1, 1])
+                        batch4train.batch["advantages"] = batch4train.batch["advantages"] * mask_rew
                         
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
@@ -1050,7 +1061,7 @@ class RayPPOTrainer(object):
 
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
-                        (is_last_step or  self.global_steps % self.config.trainer.test_freq == 0):
+                        (is_last_step or self.global_steps % self.config.trainer.test_freq == 0) and (self.global_steps > self.config.trainer.critic_warmup):
                         with _timer('testing', timing_raw):
                             val_metrics: dict = self._validate()
                             if is_last_step:

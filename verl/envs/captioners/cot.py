@@ -35,8 +35,9 @@ class COTCaptioner(BaseCaptioner):
 
         # Add CoT-specific instructions to the prompt
         cot_instructions = """
-First think about what's the best course of action step by step (in free form).
-Finally, provide a single output action (the action you should take given the current observation) at the end of the message in the form of: ACTION: <action>
+What will you do next? Please respond in the following format:
+THINK: step-by-step reasoning
+ACTION: One valid action from the allowed set
         """.strip()
 
         messages[-1].content += "\n\n" + cot_instructions

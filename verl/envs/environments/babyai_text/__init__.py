@@ -4,9 +4,9 @@ ACTIONS = {
     "turn left": "turn to the left",
     "turn right": "turn to the right",
     "go forward": "take one step forward",
-    "pick up": "pick up the object below you",
+    "pick up": "pick up the object one step in front of you",
     "drop": "drop the object that you are holding",
-    "toggle": "manipulate the object in front of you",
+    "toggle": "manipulate the object one step in front of you",
 }
 
 

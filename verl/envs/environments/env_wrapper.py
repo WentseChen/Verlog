@@ -53,11 +53,11 @@ class EnvWrapper(gym.Wrapper):
 
     def get_instruction_prompt(self, instructions=None):
         if self.env_name == "nle":
-            from balrog.environments.nle import get_instruction_prompt
+            from verl.envs.environments.nle import get_instruction_prompt
 
             return get_instruction_prompt()
         elif self.env_name == "minihack":
-            from balrog.environments.minihack import get_instruction_prompt
+            from verl.envs.environments.minihack import get_instruction_prompt
 
             return get_instruction_prompt(self.env, self.task_name)
         elif self.env_name == "babyai":
@@ -65,15 +65,15 @@ class EnvWrapper(gym.Wrapper):
 
             return get_instruction_prompt(self.env, mission=instructions)
         elif self.env_name == "textworld":
-            from balrog.environments.textworld import get_instruction_prompt
+            from verl.envs.environments.textworld import get_instruction_prompt
 
             return get_instruction_prompt(self.env, self.task_name)
         elif self.env_name == "babaisai":
-            from balrog.environments.babaisai import get_instruction_prompt
+            from verl.envs.environments.babaisai import get_instruction_prompt
 
             return get_instruction_prompt(self.env, self.task_name)
         elif self.env_name == "crafter":
-            from balrog.environments.crafter import get_instruction_prompt
+            from verl.envs.environments.crafter import get_instruction_prompt
 
             return get_instruction_prompt(self.task_name)
         else:
