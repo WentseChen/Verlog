@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from multiprocessing import Process, Pipe
+import random
 
 class CloudpickleWrapper(object):
     """
@@ -28,10 +29,10 @@ class VecEnv:
         
         self.remotes, self.work_remotes = zip(*[Pipe() for _ in range(self.n_rollouts)])
         self.processes = []
-        for (work_remote, remote, env_fn, captioner_fn) in zip(self.work_remotes, self.remotes, env_fns, captioner_fns):
+        for rank, (work_remote, remote, env_fn, captioner_fn) in enumerate(zip(self.work_remotes, self.remotes, env_fns, captioner_fns)):
             p = Process(
                 target=worker,
-                args=(work_remote, remote, env_name, CloudpickleWrapper(env_fn), CloudpickleWrapper(captioner_fn)),
+                args=(rank, work_remote, remote, env_name, CloudpickleWrapper(env_fn), CloudpickleWrapper(captioner_fn)),
             )
             p.daemon = True  # if the main process crashes, we should not cause things to hang
             p.start()
@@ -45,7 +46,17 @@ class VecEnv:
             remote.send(('step', action))
         results = [remote.recv() for remote in self.remotes]
         obs, rews, terminated, truncated, infos = zip(*results)
-        return obs, np.stack(rews), np.stack(terminated), np.stack(truncated), infos
+        
+        merged_infos = {}
+        for info in infos:
+            for key, value in info["metrics"].items():
+                if key not in merged_infos.keys():
+                    merged_infos[key] = []
+                merged_infos[key].append(value)
+        for key in merged_infos.keys():
+            merged_infos[key] = np.mean(merged_infos[key])
+        
+        return obs, np.stack(rews), np.stack(terminated), np.stack(truncated), merged_infos
     
     def reset(self):
         for remote in self.remotes:
@@ -64,7 +75,9 @@ class VecEnv:
         for remote in self.remotes:
             remote.send(('close', None))
         
-def worker(remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_wrapper):
+def worker(rank, remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_wrapper):
+    random.seed(rank)
+    np.random.seed(rank)
     parent_remote.close()
     env = env_fn_wrapper.x()
     captioner = captioner_fn_wrapper.x()
@@ -72,14 +85,14 @@ def worker(remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_wrapper
         cmd, data = remote.recv()
         
         if cmd == 'step':
-            reasoning, action, valid_action = env.extract_action(data)
-            env_obs, reward, terminated, truncated, info = env.step(valid_action)
+            reasoning, action, valid_action, metrics = env.extract_action(data)
+            env_obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             captioner.update_action(reasoning, valid_action)
             obs = captioner.get_obs(env_obs)
             if done:
                 captioner.reset()
-                env_obs, info = env.reset()
+                env_obs, _ = env.reset()
                 # TODO: move this part of code to the proper place ====
                 instructions = None
                 if env_name == "babyai":
@@ -88,11 +101,16 @@ def worker(remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_wrapper
                 captioner.prompt_builder.update_instruction_prompt(inst_prompt)
                 # =====================================================
                 obs = captioner.get_obs(env_obs)
+            
+            # TODO: better way to handle metrics #######
+            info["metrics"] = metrics
+            ############################################
+            
             remote.send((obs, reward, terminated, truncated, info))
             
         elif cmd == 'reset':
+            env_obs, info = env.reset(seed=rank)
             captioner.reset()
-            env_obs, info = env.reset()
             # TODO: move this part of code to the proper place ====
             instructions = None
             if env_name == "babyai":

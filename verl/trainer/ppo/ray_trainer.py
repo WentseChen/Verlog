@@ -565,11 +565,8 @@ class RayPPOTrainer(object):
             val_input_obs = self.tokenizer(val_input_obs_text, return_tensors='pt', padding='max_length', truncation=True, max_length=max_seq_len)
             input_ids = val_input_obs['input_ids']
             attention_mask = val_input_obs['attention_mask']
-            batch_seq_len = val_input_obs['attention_mask'].sum(dim=-1)
-            position_ids = [np.arange(seq_len) for seq_len in batch_seq_len]
-            # TODO: accelerate this
-            position_ids = torch.tensor([np.pad(pos, (max_seq_len-len(pos), 0), 'constant', constant_values=0) for pos in position_ids])
-            position_ids = position_ids.to(input_ids.device)
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
             
             val_obs_data = {
                 'input_ids': input_ids,
@@ -577,7 +574,9 @@ class RayPPOTrainer(object):
                 'position_ids': position_ids,
             }
             val_gen_batch = DataProto.from_dict(tensors=val_obs_data)
-            # test_gen_batch.meta_info = {
+            
+            # import pdb; pdb.set_trace()
+            # val_gen_batch.meta_info = {
             #     'eos_token_id': self.tokenizer.eos_token_id,
             #     'pad_token_id': self.tokenizer.pad_token_id,
             #     'recompute_log_prob': False,
@@ -846,33 +845,37 @@ class RayPPOTrainer(object):
         self.global_steps += 1
         last_val_metrics = None
         
-        # TODO: use a better way to read the default batch data
-        # get the first batch in the dataloader
-        batch_dict = None 
-        for b in self.train_dataloader:
-            batch_dict = b
-            break
-        
-        # TODO: move this to data loader
-        n_rollouts = self.config.envs.n_rollouts
-        batch_dict["input_ids"] = torch.cat([batch_dict["input_ids"], batch_dict["input_ids"][:n_rollouts]], dim=0)
-        batch_dict["attention_mask"] = torch.cat([batch_dict["attention_mask"], batch_dict["attention_mask"][:n_rollouts]], dim=0)
-        batch_dict["position_ids"] = torch.cat([batch_dict["position_ids"], batch_dict["position_ids"][:n_rollouts]], dim=0)
-        
-        # TODO: query max_response len from config, implement in an elgant way
-        max_response_length = self.config.data.max_response_length
-        zero_response = torch.zeros_like(batch_dict["input_ids"][:,-max_response_length:])
-        batch_dict["input_ids"] = torch.cat([batch_dict["input_ids"], batch_dict["input_ids"][:,-max_response_length:]], dim=1)
-        batch_dict["attention_mask"] = torch.cat([batch_dict["attention_mask"], batch_dict["attention_mask"][:,-max_response_length:]], dim=1)
-        batch_dict["position_ids"] = torch.cat([batch_dict["position_ids"], batch_dict["position_ids"][:,-max_response_length:]], dim=1)
-        
-        batch_dict["reward"] = torch.zeros_like(batch_dict["input_ids"][:,0], dtype=torch.float64)
-        batch_dict["done"] = torch.zeros_like(batch_dict["input_ids"][:,0])
-        batch_dict["responses"] = torch.zeros_like(batch_dict["input_ids"][:,-max_response_length:]) # TODO: fix this
-        
         obs, info = self.env.reset()
         
+        # for i in range(1, len(obs)):
+        #     print(obs[0] == obs[i])
+        
         for epoch in range(self.config.trainer.total_epochs):
+            
+                self.critic_warmup_step = self.config.trainer.critic_warmup_step # TODO: move to the config file
+                if self.global_steps <= self.critic_warmup_step:
+                    bsize = self.config.data.train_batch_size * self.config.trainer.critic_warmup
+                else:
+                    bsize = self.config.data.train_batch_size
+                    
+                if self.global_steps == 1 or self.global_steps > self.critic_warmup_step:
+                    esize = self.config.envs.n_rollouts
+                    plen = self.config.data.max_prompt_length
+                    rlen = self.config.data.max_response_length
+                    batch_dict = {
+                        "input_ids": torch.zeros([bsize + esize, plen + rlen], dtype=torch.int64),
+                        "attention_mask": torch.zeros([bsize + esize, plen + rlen], dtype=torch.int64),
+                        "position_ids": torch.zeros([bsize + esize, plen + rlen], dtype=torch.int64),
+                        "responses": torch.zeros([bsize + esize, rlen], dtype=torch.int64),
+                        "reward": torch.zeros([bsize + esize], dtype=torch.float64),
+                        "done": torch.zeros([bsize + esize], dtype=torch.float64),
+                        "data_source": np.zeros([bsize]),
+                        "ability": np.zeros([bsize]),
+                        "reward_model": np.zeros([bsize]),
+                        "extra_info": np.zeros([bsize]),
+                        "raw_prompt_ids": np.zeros([bsize]),
+                        "index": np.zeros([bsize]),
+                    }
         
                 metrics = {}
                 timing_raw = {}
@@ -886,68 +889,85 @@ class RayPPOTrainer(object):
 
                     assert self.config.data.train_batch_size % self.config.envs.n_rollouts == 0, \
                         f"train_batch_size ({self.config.data.train_batch_size}) must be divisible by n_rollouts ({self.config.envs.n_rollouts})."
-                    episode_len = self.config.data.train_batch_size // self.config.envs.n_rollouts
+                    episode_len = bsize // self.config.envs.n_rollouts
                     
-                    for time_step in range(episode_len+1):
+                    if self.global_steps == 1 or self.global_steps > self.critic_warmup_step:
                         
-                        # TODO: move this to a function 
-                        
-                        self.tokenizer.padding_side = "left"
-                        input_obs = self.tokenizer.apply_chat_template(obs, tokenize=False, add_generation_prompt=True) #, enable_thinking=True)
-                        input_obs = self.tokenizer(input_obs, return_tensors='pt', padding='max_length', truncation=True, max_length=max_seq_len)
-                        input_ids = input_obs['input_ids']
-                        attention_mask = input_obs['attention_mask']
-                        position_ids = attention_mask.long().cumsum(-1) - 1
-                        position_ids.masked_fill_(attention_mask == 0, 1)
-                        
-                        obs_data = {
-                            'input_ids': input_ids,
-                            'attention_mask': attention_mask,
-                            'position_ids': position_ids,
-                        }
-                        gen_batch = DataProto.from_dict(tensors=obs_data)
-                        
-                        if time_step == episode_len:
+                        for time_step in range(episode_len+1):
+                            
+                            # TODO: move this to a function 
+                            
+                            self.tokenizer.padding_side = "left"
+                            input_obs = self.tokenizer.apply_chat_template(obs, tokenize=False, add_generation_prompt=True) #, enable_thinking=True)
+                            
+                            # test_input_obs = self.tokenizer(input_obs)
+                            # print("time_step: ", time_step)
+                            # for data in test_input_obs['input_ids']:
+                            #     print(len(data), end=", ")
+                            # print("\n")
+                            
+                            input_obs = self.tokenizer(input_obs, return_tensors='pt', padding='max_length', truncation=True, max_length=max_seq_len)
+                            
+                            # for didx, data in enumerate(test_input_obs['input_ids']):
+                            #     if len(data) > 768:
+                            #         print(self.tokenizer.decode(input_obs['input_ids'][didx], skip_special_tokens=False))
+                            #         print("="*20)
+                                    
+                            input_ids = input_obs['input_ids']
+                            attention_mask = input_obs['attention_mask']
+                            position_ids = attention_mask.long().cumsum(-1) - 1
+                            position_ids.masked_fill_(attention_mask == 0, 1)
+                            
+                            obs_data = {
+                                'input_ids': input_ids,
+                                'attention_mask': attention_mask,
+                                'position_ids': position_ids,
+                            }
+                            gen_batch = DataProto.from_dict(tensors=obs_data)
+                            
+                            if time_step == episode_len:
+                                batch.insert(
+                                    gen_batch,
+                                    start_idx = time_step * self.config.envs.n_rollouts,
+                                    end_idx = (time_step + 1) * self.config.envs.n_rollouts,
+                                    diff_size=True,
+                                )
+                                break
+                            
+                            # TODO: query data at the given time_step
+                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                            
+                            response_ids = gen_batch_output.batch['responses']
+                            actions = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+                            # print("actions:\n", actions[-1])
+                            # print("="*30)
+                            
+                            obs, reward, terminated, truncated, info = self.env.step(actions)
+                            # print("obs:\n", obs[-1])
+                            # print("-"*20)
+                            done = np.logical_or(terminated, truncated)
+                            
+                            metrics.update(info)
+                            
+                            gen_batch_output.batch["done"] = done # TODO: check correctness
+                            gen_batch_output.batch["reward"] = reward
+                            
+                            # print("reward: ", reward)
+                            # print("done: ", done)
+                            # print("t=", time_step)
+                            # print("="*30)
+                            
                             batch.insert(
-                                gen_batch,
+                                gen_batch_output,
                                 start_idx = time_step * self.config.envs.n_rollouts,
                                 end_idx = (time_step + 1) * self.config.envs.n_rollouts,
-                                diff_size=True,
                             )
-                            break
-                        
-                        # TODO: query data at the given time_step
-                        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                        
-                        response_ids = gen_batch_output.batch['responses']
-                        actions = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
-                        # print("actions:\n", actions[-1])
-                        # print("="*30)
-                        
-                        obs, reward, terminated, truncated, info = self.env.step(actions)
-                        # print("obs:\n", obs[-1])
-                        # print("-"*20)
-                        done = np.logical_or(terminated, truncated)
-                        
-                        gen_batch_output.batch["done"] = done # TODO: check correctness
-                        gen_batch_output.batch["reward"] = reward
-                        
-                        # print("reward: ", reward)
-                        # print("done: ", done)
-                        # print("t=", time_step)
-                        # print("="*30)
-                        
-                        batch.insert(
-                            gen_batch_output,
-                            start_idx = time_step * self.config.envs.n_rollouts,
-                            end_idx = (time_step + 1) * self.config.envs.n_rollouts,
-                        )
-                        
-                        # input_ids = batch.batch['input_ids'][0]
-                        # input_ids_text = self.tokenizer.decode(input_ids, skip_special_tokens=False)
-                        # input_ids = batch.batch['input_ids'][20]
-                        # input_ids_text = self.tokenizer.decode(input_ids, skip_special_tokens=False)
-                        
+                            
+                            # input_ids = batch.batch['input_ids'][0]
+                            # input_ids_text = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+                            # input_ids = batch.batch['input_ids'][20]
+                            # input_ids_text = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+                            
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer('gen_max', timing_raw):
                             gen_baseline_batch = deepcopy(gen_batch)
@@ -998,10 +1018,16 @@ class RayPPOTrainer(object):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
                             
+                            
                     with _timer('adv', timing_raw):
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
+                            batch.batch['token_level_rewards'] = torch.zeros_like(batch.batch['response_mask'], dtype=torch.float64)
+                            seq_len = batch.batch['response_mask'].sum(-1) - 1
+                            indices = torch.arange(batch.batch['response_mask'].shape[0], device=seq_len.device)
+                            batch.batch['token_level_rewards'][indices, seq_len] = batch.batch['reward']
+                            batch.batch['token_level_scores'] = batch.batch['token_level_rewards'].clone() 
                             batch, kl_metrics = apply_kl_penalty(batch,
                                                                     kl_ctrl=self.kl_ctrl_in_reward,
                                                                     kl_penalty=self.config.algorithm.kl_penalty)
@@ -1022,14 +1048,25 @@ class RayPPOTrainer(object):
                                                     token_lam=self.config.algorithm.token_lam,
                                                     n_rollouts=self.config.envs.n_rollouts)
 
+                    if self.global_steps > self.critic_warmup_step:
+                        batch4train = copy.deepcopy(batch)
+                        batch4train.batch = batch4train.batch[:bsize].contiguous()
+                        for key in batch4train.non_tensor_batch.keys():
+                            batch4train.non_tensor_batch[key] = batch4train.non_tensor_batch[key][:bsize]
+                        for key in batch4train.meta_info.keys():
+                            if isinstance(batch4train.meta_info[key], list):
+                                batch4train.meta_info[key] = batch4train.meta_info[key][:bsize]
+                    else:
+                        batch4train = copy.deepcopy(batch)
+                        random_len = self.config.data.train_batch_size * 10
+                        random_indices = torch.randperm(bsize)[:random_len]
+                        batch4train.batch = batch4train.batch[random_indices].contiguous()
+                        for key in batch4train.non_tensor_batch.keys():
+                            batch4train.non_tensor_batch[key] = batch4train.non_tensor_batch[key][random_indices]
+                        for key in batch4train.meta_info.keys():
+                            if isinstance(batch4train.meta_info[key], list):
+                                batch4train.meta_info[key] = [batch4train.meta_info[key][i.item()] for i in random_indices]
 
-                    batch4train = copy.deepcopy(batch)
-                    batch4train.batch = batch4train.batch[:self.config.data.train_batch_size].contiguous()
-                    for key in batch4train.non_tensor_batch.keys():
-                        batch4train.non_tensor_batch[key] = batch4train.non_tensor_batch[key][:self.config.data.train_batch_size]
-                    for key in batch4train.meta_info.keys():
-                        if isinstance(batch4train.meta_info[key], list):
-                            batch4train.meta_info[key] = batch4train.meta_info[key][:self.config.data.train_batch_size]
 
                     # update critic
                     if self.use_critic:
@@ -1037,22 +1074,9 @@ class RayPPOTrainer(object):
                             critic_output = self.critic_wg.update_critic(batch4train)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
                         metrics.update(critic_output_metrics)
-                    
-                    if self.config.trainer.mask_last_turn and self.global_steps < 100:
-                        mask_adv = batch4train.batch["advantages"].reshape(-1, self.config.envs.n_rollouts, batch4train.batch["advantages"].shape[-1])
-                        mask_rew = batch4train.batch["reward"].reshape(-1, self.config.envs.n_rollouts)
-                        for row_id in range(len(mask_rew)-1):
-                            mask_rew[row_id] = mask_rew[row_id] + mask_rew[row_id+1]
-                        for row_id in range(len(mask_rew)-1):
-                            mask_rew[row_id] = mask_rew[row_id] + mask_rew[row_id+1]
-                        for row_id in range(len(mask_rew)-1):
-                            mask_rew[row_id] = mask_rew[row_id] + mask_rew[row_id+1]
-                        mask_rew = (mask_rew==0.) * 1.
-                        mask_rew = mask_rew.reshape([-1, 1])
-                        batch4train.batch["advantages"] = batch4train.batch["advantages"] * mask_rew
                         
                     # implement critic warmup
-                    if self.config.trainer.critic_warmup <= self.global_steps:
+                    if self.critic_warmup_step <= self.global_steps:
                         # update actor
                         with _timer('update_actor', timing_raw):
                             actor_output = self.actor_rollout_wg.update_actor(batch4train)
@@ -1061,7 +1085,7 @@ class RayPPOTrainer(object):
 
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
-                        (is_last_step or self.global_steps % self.config.trainer.test_freq == 0) and (self.global_steps > self.config.trainer.critic_warmup):
+                        (is_last_step or self.global_steps % self.config.trainer.test_freq == 0) and (self.global_steps > self.critic_warmup_step):
                         with _timer('testing', timing_raw):
                             val_metrics: dict = self._validate()
                             if is_last_step:

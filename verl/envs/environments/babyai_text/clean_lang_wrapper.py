@@ -10,6 +10,28 @@ BABYAI_ACTION_SPACE = [
     "toggle",
 ]
 
+POSSIBLE_ACTIONS = [
+    "turn left",
+    "turn to the left",
+    "turn right",
+    "turn to the right",
+    "go forward",
+    "move forward",
+    "pick up",
+    "pick it up",
+    "drop",
+    "toggle",
+    "open",
+    "turning left",
+    "turning right",
+    "moving forward",
+    "picking up",
+    "dropping",
+    "toggling",
+    "opening",
+]
+    
+
 class BabyAITextCleanLangWrapper(gym.Wrapper):
     def __init__(self, env, vlm=False, **kwargs):
         super().__init__(env)
@@ -17,6 +39,8 @@ class BabyAITextCleanLangWrapper(gym.Wrapper):
         self._mission = None
         self.progression = 0.0
         self.format_penalty = kwargs.get("format_penalty", 0.0)
+        self.binary_reward = kwargs.get("binary_reward", False)
+        # self.early_truncate = kwargs.get("early_truncate", False)
 
     @property
     def max_steps(self):
@@ -81,13 +105,25 @@ class BabyAITextCleanLangWrapper(gym.Wrapper):
         
         valid_action = action if action in self.language_action_space else self.default_action
         
-        return reasoning, action, valid_action
+        total_action_occurrences = 0
+        for p_action in POSSIBLE_ACTIONS:
+            total_action_occurrences += reasoning.lower().count(p_action.lower())
+        valid_count = 1 if valid_action == action else 0
+        total_but_occurrences = 0
+        for word in ["However", "different", "but", "wait", "won't", "can't", "cannot", "another"]:
+            total_but_occurrences += reasoning.lower().count(word.lower())
+        metrics = {
+            "behavior/valid_action_ratio": valid_count,
+            "behavior/plan_length": total_action_occurrences,
+            "behavior/backtrack_length": total_but_occurrences
+        }
+        
+        return reasoning, action, valid_action, metrics
 
     def step(self, action):
         
         valid_actions = False
         action_int = self.language_action_space.index(self.default_action)
-            
         for a_idx, a in enumerate(self.language_action_space):
             lower_gt_action = a.lower()
             if lower_gt_action == action:
@@ -106,6 +142,9 @@ class BabyAITextCleanLangWrapper(gym.Wrapper):
             reward = -self.format_penalty
             # terminated = True
             # truncated = True
+        
+        if self.binary_reward:
+            reward = 1.0 if reward > 0 else reward
         
         return obs, reward*1.0, terminated, truncated, infos
 

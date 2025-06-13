@@ -10,13 +10,16 @@ BABAISAI_ACTION_SPACE = [a.name for a in baba.grid.BabaIsYouEnv.Actions]
 
 
 class BabaIsAIWrapper(gym.Wrapper):
-    def __init__(self, env: gym.Env, add_ruleset=True, vlm=False):
+    def __init__(self, env: gym.Env, add_ruleset=True, vlm=False, **kwargs):
         super().__init__(env)
         self.add_ruleset = add_ruleset
         self.language_action_space = BABAISAI_ACTION_SPACE[:]
         self.progression = 0.0
         self.target_plan = None
-
+        
+        self.format_penalty = kwargs.get("format_penalty", 0.0)
+        self.binary_reward = kwargs.get("binary_reward", False)
+        
     @property
     def default_action(self):
         return BABAISAI_ACTION_SPACE[0]
@@ -170,12 +173,26 @@ class BabaIsAIWrapper(gym.Wrapper):
         return self.textworld_process_obsv(obs)
 
     def step(self, action):
-        action_int = self.language_action_space.index(action)
+        
+        valid_actions = False
+        action_int = self.language_action_space.index(self.default_action)
+        for a_idx, a in enumerate(self.language_action_space):
+            lower_gt_action = a.lower()
+            if lower_gt_action == action:
+                action_int = a_idx
+                valid_actions = True
+                break
+        
         obs, reward, done, info = self.env.step(action_int)
 
         if done:
             self.progression = 1.0 if reward > 0 else 0.0
-
+            
+        if self.format_penalty > 0.0 and not valid_actions:
+            reward = -self.format_penalty
+        if self.binary_reward:
+            reward = 1.0 if reward > 0 else reward 
+        
         return self.textworld_process_obsv(obs), reward*1.0, done, info
 
     def get_stats(self):
@@ -200,4 +217,13 @@ class BabaIsAIWrapper(gym.Wrapper):
         
         valid_action = action if action in self.language_action_space else self.default_action
         
-        return reasoning, action, valid_action
+        valid_count = 1 if valid_action == action else 0
+        total_but_occurrences = 0
+        for word in ["However", "different", "but", "wait", "won't", "can't", "cannot", "another"]:
+            total_but_occurrences += reasoning.lower().count(word.lower())
+        metrics = {
+            "behavior/valid_action_ratio": valid_count,
+            "behavior/backtrack_length": total_but_occurrences
+        }
+        
+        return reasoning, action, valid_action, metrics

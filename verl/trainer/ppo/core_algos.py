@@ -126,7 +126,10 @@ def compute_gae_advantage_return(
                 
                 rew_t = batch_rewards[env_t, :, token_t]
                 v_t = batch_values[env_t, :, token_t]
-                update_t = batch_response_mask[env_t, :, token_t] # need_update=1, not_update=0
+                if token_t == 0:
+                    update_t = 1
+                else:
+                    update_t = batch_response_mask[env_t, :, token_t-1] # need_update=1, not_update=0 # TODO: fix this bug
                 
                 delta = rew_t + gamma * next_values * (1 - done_t) - v_t
                 gae = (delta + gamma * lam * gae) * update_t + gae * (1 - update_t)
@@ -140,6 +143,7 @@ def compute_gae_advantage_return(
             advantages_reversed = torch.stack(advantages_reversed, dim=-1)
             step_advantage = torch.flip(advantages_reversed, dims=[-1])
             all_advantages_reversed.append(step_advantage)
+        
         all_advantages_reversed = torch.stack(all_advantages_reversed, dim=0)
         all_advantages = torch.flip(all_advantages_reversed, dims=[0])
         
@@ -468,7 +472,7 @@ def compute_entropy_loss(logits, response_mask):
     return entropy_loss
 
 
-def compute_value_loss(vpreds, returns, values, response_mask, cliprange_value):
+def compute_value_loss(vpreds, returns, values, response_mask, cliprange_value, highlight_first=False):
     """Compute the value loss. Copied from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1151
 
     Args:
@@ -489,8 +493,17 @@ def compute_value_loss(vpreds, returns, values, response_mask, cliprange_value):
     vpredclipped = verl_F.clip_by_value(vpreds, values - cliprange_value, values + cliprange_value)
     vf_losses1 = (vpreds - returns)**2
     vf_losses2 = (vpredclipped - returns)**2
-    vf_loss = 0.5 * verl_F.masked_mean(torch.max(vf_losses1, vf_losses2), response_mask)
+    
+    vf_loss = torch.max(vf_losses1, vf_losses2)
+    if highlight_first:
+        FIRST_RATIO = 10.0
+        vf_loss[:, 0] *= FIRST_RATIO
+    
+    vf_loss = 0.5 * verl_F.masked_mean(vf_loss, response_mask)
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), response_mask)
+    
+    
+    
     return vf_loss, vf_clipfrac
 
 

@@ -227,7 +227,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                                                                          values=values,
                                                                          returns=returns,
                                                                          response_mask=response_mask,
-                                                                         cliprange_value=self.config.cliprange_value)
+                                                                         cliprange_value=self.config.cliprange_value,
+                                                                         highlight_first=self.config.highlight_first)
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
