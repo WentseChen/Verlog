@@ -84,6 +84,20 @@ def union_tensor_dict(tensor_dict1: TensorDict, tensor_dict2: TensorDict) -> Ten
 
     return tensor_dict1
 
+def insert_tensor_dict(tensor_dict1: TensorDict, tensor_dict2: TensorDict, start_idx: int, end_idx: int, diff_size: bool = False) -> TensorDict:
+    """Insert tensor_dict2 into tensor_dict1 at the specified start and end indices."""
+    assert end_idx - start_idx == tensor_dict2.batch_size[0], \
+        f'The size of tensor_dict2 must be equal to end_idx - start_idx. Got {tensor_dict2.batch_size[0]} and {end_idx - start_idx}'
+    
+    for key in tensor_dict2.keys():
+        if key in tensor_dict1.keys():
+            if diff_size:
+                last_dim_size = tensor_dict2[key].shape[-1]
+                tensor_dict1[key][start_idx:end_idx,:last_dim_size] = tensor_dict2[key]
+            else:
+                tensor_dict1[key][start_idx:end_idx] = tensor_dict2[key]
+    return tensor_dict1
+
 
 def union_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     for key, val in tensor_dict2.items():
@@ -97,6 +111,19 @@ def union_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str
 
     return tensor_dict1
 
+def insert_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str, np.ndarray], start_idx: int, end_idx: int, diff_size: bool = False) -> dict[str, np.ndarray]:
+    """
+    At the final step in an episode, we received only the observation without a response. 
+    The dimension might be incorrect in the last dimension. 
+    Store only the token for observation to calculate the critic's value.
+    """
+    for key, val in tensor_dict2.items():
+        if diff_size:
+            last_dim_size = tensor_dict2[key].shape[-1]
+            tensor_dict1[key][start_idx:end_idx,:last_dim_size] = val
+        else:
+            tensor_dict1[key][start_idx:end_idx] = val
+    return tensor_dict1
 
 def list_of_dict_to_dict_of_list(list_of_dict: list[dict]):
     if len(list_of_dict) == 0:
@@ -297,8 +324,9 @@ class DataProto:
                 assert isinstance(
                     val, np.ndarray
                 ), f'data in the non_tensor_batch must be a numpy.array with dtype=object, but for {key=}, got {type(val)=}'
-                assert val.shape[
-                    0] == batch_size, f'key {key} length {len(val)} is not equal to batch size {batch_size}'
+                # TODO: add this assertion only when using env ineteraction
+                # assert val.shape[
+                #     0] == batch_size, f'key {key} length {len(val)} is not equal to batch size {batch_size}'
 
     @classmethod
     def from_single_dict(cls, data: Dict[str, Union[torch.Tensor, np.ndarray]], meta_info=None):
@@ -706,6 +734,68 @@ class DataProto:
             meta_info=self.meta_info,
         )
 
+    def query(self, start_idx, end_idx, batch_keys=None, non_tensor_batch_keys=None, meta_info_keys=None) -> 'DataProto':
+        """Query a subset of the DataProto via `start_idx` and `end_idx` for batch_keys, non_tensor_batch_keys and meta_info_keys
+
+        Args:
+            start_idx (int): start index for slicing
+            end_idx (int): end index for slicing
+            batch_keys (list, optional): a list of strings indicating the keys in batch to query
+            non_tensor_batch_keys (list, optional): a list of strings indicating the keys in non_tensor_batch to query
+            meta_info_keys (list, optional): a list of keys indicating the meta info to query
+
+        Returns:
+            DataProto: the DataProto with the queried batch_keys, non_tensor_batch_keys and meta_info_keys
+        """
+        assert batch_keys is not None
+        if meta_info_keys is None:
+            meta_info_keys = []
+        if non_tensor_batch_keys is None:
+            non_tensor_batch_keys = []
+
+        tensors = dict()
+        # tensor batch
+        for key in batch_keys:
+            assert key in self.batch.keys()
+            # all_tensor = self.batch.pop(key) # TODO: check this
+            all_tensor = self.batch[key]
+            tensors[key] = all_tensor[start_idx:end_idx]
+        
+        non_tensors = dict()
+        # non tensor batch
+        for key in non_tensor_batch_keys:
+            assert key in self.non_tensor_batch.keys()
+            # all_non_tensor = self.non_tensor_batch.pop(key)
+            all_non_tensor = self.non_tensor_batch[key]
+            non_tensors[key] = all_non_tensor[start_idx:end_idx]
+        
+        meta_info = dict()
+        for key in meta_info_keys:
+            assert key in self.meta_info.keys()
+            # all_meta_info = self.meta_info.pop(key)
+            all_meta_info = self.meta_info[key]
+            meta_info[key] = all_meta_info[start_idx:end_idx]
+        
+        return DataProto.from_dict(tensors=tensors, non_tensors=non_tensors, meta_info=meta_info)
+
+    def insert(self, other: 'DataProto', start_idx: int, end_idx: int, diff_size: bool = False) -> 'DataProto':
+        """ Insert another DataProto into the current DataProto at the specified start and end indices.
+        Throw an error if
+
+        - there are conflict keys in batch and they are not equal
+        - the batch size of two data batch is not the same
+        - there are conflict keys in meta_info and they are not the same.
+
+        Args:
+            other (DataProto): another DataProto to union
+
+        Returns:
+            DataProto: self, the DataProto after union
+        """
+        self.batch = insert_tensor_dict(self.batch, other.batch, start_idx, end_idx, diff_size)
+        self.non_tensor_batch = insert_numpy_dict(self.non_tensor_batch, other.non_tensor_batch, start_idx, end_idx, diff_size)
+        # self.meta_info = union_two_dict(self.meta_info, other.meta_info) # TODO: add this
+        return self
 
 import ray
 
