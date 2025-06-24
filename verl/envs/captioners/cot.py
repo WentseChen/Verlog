@@ -6,13 +6,14 @@ from verl.envs.captioners.base import BaseCaptioner
 class COTCaptioner(BaseCaptioner):
     """A captioner that performs actions using a chain-of-thought reasoning process."""
 
-    def __init__(self, prompt_builder):
+    def __init__(self, prompt_builder, env_name):
         """Initialize the ChainOfThoughtAgent with a client, prompt builder, and configuration.
 
         Args:
             prompt_builder (PromptBuilder): Object to build prompts for the agent.
         """
         super().__init__(prompt_builder)
+        self.env_name = env_name
 
     def get_obs(self, obs):
         """Convert environment observation to a prompt for the LLM.
@@ -28,11 +29,19 @@ class COTCaptioner(BaseCaptioner):
         messages = self.prompt_builder.get_prompt()
 
         # Add CoT-specific instructions to the prompt
-        cot_instructions = """
-What will you do next? Please respond in the following format:
-THINK: step-by-step reasoning
-ACTION: One valid action from the allowed set
-        """.strip()
+        
+        if self.env_name == "babaisai":
+            cot_instructions = """
+    What will you do next? Please respond in the following format:
+    THINK: step-by-step reasoning
+    ACTION: One valid action from the allowed set: idle, up, right, down, left
+            """.strip()
+        else:
+            cot_instructions = """
+    What will you do next? Please respond in the following format:
+    THINK: step-by-step reasoning
+    ACTION: One valid action from the allowed set.
+            """.strip()
 
         messages[-1].content += "\n\n" + cot_instructions
 

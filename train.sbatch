@@ -17,8 +17,8 @@ conda activate zero
 # Run training script
 cd /u/wchen11/verl
 
-PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
- data.train_files=$HOME/data/gsm8k/test.parquet \
+PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
+ data.train_files=$HOME/verl/examples/data/placeholder.parquet \
  data.val_files=$HOME/verl/examples/data/placeholder.parquet \
  data.train_batch_size=256 \
  data.max_prompt_length=1024 \
@@ -64,4 +64,4 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.nnodes=1 \
  trainer.save_freq=100000000 \
  trainer.test_freq=15 \
- trainer.total_epochs=400 2>&1 | tee verl_demo.log
+ trainer.total_epochs=150 2>&1 | tee verl_demo.log
