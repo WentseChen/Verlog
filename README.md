@@ -23,6 +23,24 @@ Verlog is a well-tuned multi-turn RL framework built for long-horizon LLM agenti
 
 All the experiments are done with Qwen2.5-3B-Instruct model, PPO on 4xA40 GPUs with 48Gb memory for 24 hours.
 
+* BabyAI Results (win rate)
+
+    | Task                  | Instruct-model | Ours |
+    |------------------------|----------------|------|
+    | goto                  | 0.88           | 1.0  |
+    | pickup                | 0.41           | 1.0  |
+    | pick_up_seq_go_to     | 0.22           | 1.0  |
+    | open                  | 0.09           | 1.0  |
+
+* BabaIsAI Results (win rate)
+
+    | Task                                   | Instruct-model | Ours |
+    |-----------------------------------------|----------------|------|
+    | goto_win-distr_obj                    | 0.21           | 1.0  |
+    | two_room-goto_win                     | 0.09           | 1.0  |
+    | two_room-goto_win-distr_obj_rule      | 0.09           | 1.0  |
+    | two_room-maybe_break_stop-goto_win    | 0.21           | 0.69 |
+
 
 ## Installation
 

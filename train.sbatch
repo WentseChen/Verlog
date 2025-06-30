@@ -15,9 +15,6 @@ cd verlog
 
 VERLOG=$HOME/verlog
 
-remote=gs://cmu-gpucloud-wentsec
-local=/dev/shm
-
 PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
  data.train_files=$VERLOG/examples/data/placeholder.parquet \
  data.val_files=$VERLOG/examples/data/placeholder.parquet \
