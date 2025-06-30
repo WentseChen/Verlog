@@ -162,8 +162,9 @@ class vLLMRollout(BaseRollout):
 
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+                            
         # rebuild vllm cache engine
-        if self.config.free_cache_engine:
+        if self.config.free_cache_engine and (prompts.meta_info["step"] == 0 or prompts.meta_info["step"] == None):
             self.inference_engine.init_cache_engine()
 
         idx = prompts.batch['input_ids']  # (bs, prompt_length)
@@ -254,7 +255,7 @@ class vLLMRollout(BaseRollout):
             batch_size=batch_size)
 
         # free vllm cache engine
-        if self.config.free_cache_engine:
+        if self.config.free_cache_engine and (prompts.meta_info["step"] == -1 or prompts.meta_info["step"] == None):
             self.inference_engine.free_cache_engine()
 
         return DataProto(batch=batch)

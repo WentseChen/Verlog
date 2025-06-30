@@ -1,4 +1,4 @@
-from balrog.environments.textworld.base import TextWorldFactory
+from verl.envs.environments.textworld.base import TextWorldFactory
 
 TEXTWORLD_FACTORY = None
 

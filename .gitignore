@@ -120,6 +120,7 @@ tests/e2e/toy_examples/deepspeed/synchronous/output.txt
 
 # data
 *.parquet
+!examples/data/placeholder.parquet
 
 
 # local logs
@@ -127,4 +128,6 @@ logs
 log
 outputs
 
+*.whl*
+core
 *.sbatch

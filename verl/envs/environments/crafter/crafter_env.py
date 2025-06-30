@@ -2,9 +2,9 @@ from typing import Optional
 
 import crafter
 
-from balrog.environments.crafter import CrafterLanguageWrapper
-from balrog.environments.wrappers import GymV21CompatibilityV0
-
+from verl.envs.environments.crafter import CrafterLanguageWrapper
+from verl.envs.environments.wrappers import GymV21CompatibilityV0
+from verl.envs.environments.crafter import CrafterLLMAgentsWrapper
 
 def make_crafter_env(env_name, task, config, render_mode: Optional[str] = None):
     crafter_kwargs = dict(config.envs.crafter_kwargs)
@@ -17,5 +17,6 @@ def make_crafter_env(env_name, task, config, render_mode: Optional[str] = None):
     env = crafter.Env(**crafter_kwargs)
     env = CrafterLanguageWrapper(env, task, max_episode_steps=max_episode_steps)
     env = GymV21CompatibilityV0(env=env, render_mode=render_mode)
+    env = CrafterLLMAgentsWrapper(env, **config.envs)
 
     return env

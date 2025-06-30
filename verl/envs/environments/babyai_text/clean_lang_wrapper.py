@@ -55,21 +55,14 @@ class BabyAITextCleanLangWrapper(gym.Wrapper):
         return obs, info
 
     def step(self, action):
-        
-        action_int = self.language_action_space.index(self.default_action)
-        for a_idx, a in enumerate(self.language_action_space):
-            if a in action:
-                action_int = a_idx
-                break
-        
-        # action_int = self.language_action_space.index(action)
+        action_int = self.language_action_space.index(action)
         obs, reward, terminated, truncated, infos = self.env.step(action_int)
         if reward > 0:
             self.progression = 1.0
         prompt, image = self.get_prompt(obs, infos)
         obs["text"] = {"long_term_context": prompt, "short_term_context": ""}
         obs["image"] = image
-        return obs, reward*1.0, terminated, truncated, infos
+        return obs, reward, terminated, truncated, infos
 
     def get_stats(self):
         # No special stats tracking implemented for now

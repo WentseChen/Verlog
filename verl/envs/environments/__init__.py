@@ -21,30 +21,30 @@ def make_env(env_name, task, config, render_mode=None):
         ValueError: If the environment name is not recognized.
     """
     if env_name == "nle":
-        from balrog.environments.nle.nle_env import make_nle_env
+        from verl.envs.environments.nle.nle_env import make_nle_env
 
         base_env = make_nle_env(env_name, task, config, render_mode=render_mode)
     elif env_name == "minihack":
-        from balrog.environments.minihack.minihack_env import make_minihack_env
+        from verl.envs.environments.minihack.minihack_env import make_minihack_env
 
         base_env = make_minihack_env(env_name, task, config, render_mode=render_mode)
     elif env_name == "babyai":
         from verl.envs.environments.babyai_text.babyai_env import make_babyai_env
         base_env = make_babyai_env(env_name, task, config, render_mode=render_mode)
     elif env_name == "crafter":
-        from balrog.environments.crafter.crafter_env import make_crafter_env
+        from verl.envs.environments.crafter.crafter_env import make_crafter_env
 
         base_env = make_crafter_env(env_name, task, config, render_mode=render_mode)
     elif env_name == "textworld":
-        from balrog.environments.textworld.textworld_env import make_textworld_env
+        from verl.envs.environments.textworld.textworld_env import make_textworld_env
 
         base_env = make_textworld_env(env_name, task, config, render_mode=render_mode)
     elif env_name == "babaisai":
-        from balrog.environments.babaisai.babaisai_env import make_babaisai_env
-
+        from verl.envs.environments.babaisai.babaisai_env import make_babaisai_env
         base_env = make_babaisai_env(env_name, task, config, render_mode=render_mode)
     else:
         raise ValueError(f"Unknown environment: {env_name}")
+    
     return EnvWrapper(base_env, env_name, task)
 
 

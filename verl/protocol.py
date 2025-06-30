@@ -112,6 +112,11 @@ def union_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str
     return tensor_dict1
 
 def insert_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str, np.ndarray], start_idx: int, end_idx: int, diff_size: bool = False) -> dict[str, np.ndarray]:
+    """
+    At the final step in an episode, we received only the observation without a response. 
+    The dimension might be incorrect in the last dimension. 
+    Store only the token for observation to calculate the critic's value.
+    """
     for key, val in tensor_dict2.items():
         if diff_size:
             last_dim_size = tensor_dict2[key].shape[-1]
@@ -730,14 +735,17 @@ class DataProto:
         )
 
     def query(self, start_idx, end_idx, batch_keys=None, non_tensor_batch_keys=None, meta_info_keys=None) -> 'DataProto':
-        """Pop a subset of the DataProto via `batch_keys` and `meta_info_keys`
+        """Query a subset of the DataProto via `start_idx` and `end_idx` for batch_keys, non_tensor_batch_keys and meta_info_keys
 
         Args:
-            batch_keys (list, optional): a list of strings indicating the keys in batch to pop
-            meta_info_keys (list, optional): a list of keys indicating the meta info to pop
+            start_idx (int): start index for slicing
+            end_idx (int): end index for slicing
+            batch_keys (list, optional): a list of strings indicating the keys in batch to query
+            non_tensor_batch_keys (list, optional): a list of strings indicating the keys in non_tensor_batch to query
+            meta_info_keys (list, optional): a list of keys indicating the meta info to query
 
         Returns:
-            DataProto: the DataProto with the poped batch_keys and meta_info_keys
+            DataProto: the DataProto with the queried batch_keys, non_tensor_batch_keys and meta_info_keys
         """
         assert batch_keys is not None
         if meta_info_keys is None:
@@ -745,30 +753,33 @@ class DataProto:
         if non_tensor_batch_keys is None:
             non_tensor_batch_keys = []
 
-        tensors = {}
+        tensors = dict()
         # tensor batch
         for key in batch_keys:
             assert key in self.batch.keys()
             # all_tensor = self.batch.pop(key) # TODO: check this
             all_tensor = self.batch[key]
             tensors[key] = all_tensor[start_idx:end_idx]
-        non_tensors = {}
+        
+        non_tensors = dict()
         # non tensor batch
         for key in non_tensor_batch_keys:
             assert key in self.non_tensor_batch.keys()
             # all_non_tensor = self.non_tensor_batch.pop(key)
             all_non_tensor = self.non_tensor_batch[key]
             non_tensors[key] = all_non_tensor[start_idx:end_idx]
-        meta_info = {}
+        
+        meta_info = dict()
         for key in meta_info_keys:
             assert key in self.meta_info.keys()
             # all_meta_info = self.meta_info.pop(key)
             all_meta_info = self.meta_info[key]
             meta_info[key] = all_meta_info[start_idx:end_idx]
+        
         return DataProto.from_dict(tensors=tensors, non_tensors=non_tensors, meta_info=meta_info)
 
     def insert(self, other: 'DataProto', start_idx: int, end_idx: int, diff_size: bool = False) -> 'DataProto':
-        """Union with another DataProto. Union batch and meta_info separately.
+        """ Insert another DataProto into the current DataProto at the specified start and end indices.
         Throw an error if
 
         - there are conflict keys in batch and they are not equal
@@ -779,7 +790,7 @@ class DataProto:
             other (DataProto): another DataProto to union
 
         Returns:
-            DataProto: the DataProto after union
+            DataProto: self, the DataProto after union
         """
         self.batch = insert_tensor_dict(self.batch, other.batch, start_idx, end_idx, diff_size)
         self.non_tensor_batch = insert_numpy_dict(self.non_tensor_batch, other.non_tensor_batch, start_idx, end_idx, diff_size)
