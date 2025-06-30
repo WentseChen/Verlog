@@ -9,7 +9,7 @@
 <!-- [![Documentation](https://img.shields.io/badge/documentation-blue)](https://verl.readthedocs.io/en/latest/) -->
 <!-- <a href="https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/WeChat.JPG"><img src="https://img.shields.io/badge/微信-green?logo=wechat&amp"></a> -->
 
-Verlog is a well-tuned multi-turn RL (PPO) framework built for long-horizon LLM agentic tasks. It extends VeRL and BALROG, and follows the core design principles of pytorch-ppo, while introducing tailored modifications for efficient multi-turn learning.
+Verlog is a well-tuned multi-turn RL framework built for long-horizon LLM agentic tasks. It extends [VeRL](https://github.com/volcengine/verl) and [BALROG](https://github.com/balrog-ai/BALROG), and follows the core design principles of [pytorch-a2c-ppo-acktr-gail](https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail), while introducing tailored modifications for efficient multi-turn learning.
 
 ## Key features:  
 
@@ -24,32 +24,33 @@ Verlog is a well-tuned multi-turn RL (PPO) framework built for long-horizon LLM 
 All the experiments are done with Qwen2.5-3B-Instruct model, PPO on 4xA40 GPUs with 48Gb memory for 24 hours.
 
 
+## Installation
 
+* create a conda environment
+```bash
+conda create -n verlog python=3.10
+conda activate verlog
+```
 
-## System Design Overview
+* install Balrog as a temporary dependency
+```bash
+git clone https://github.com/balrog-ai/BALROG.git
+cd BALROG
+pip install -e .
+balrog-post-install
+```
 
-<p align="center">
+* install Verlog
+```bash
+# 1. Clone this repository
+# 2. If you need to run with megatron
+bash scripts/install_vllm_sglang_mcore.sh
+# Or if you simply need to run with FSDP
+USE_MEGATRON=0 bash scripts/install_vllm_sglang_mcore.sh
+# 3. Install Verlog
+pip install --no-deps -e .
+```
 
-<img src="step_level_gae.gif" width="600" alt="Step Level GAE">
+## Get Started
 
-Similar to classic RL libraries such as [OpenAI Spinning Up](https://spinningup.openai.com/en/latest/), LLM\_agents\_PPO provides a step-level framework tailored for LLM agents.
-
-1. LLM\_agents\_PPO adopts a step-level approach where each step serves as an individual training data point, rather than treating entire episodes as a training data point. This approach allows for **customizing the memory mechanism** specific to each step, which is particularly beneficial for tackling long horizon tasks.
-
-2. One key feature of LLM\_agents\_PPO is the ability to **early truncate rollouts** at any step, enhancing training efficiency and enabling better management of long horizon tasks. This method uses the value of the subsequent step as the supervised signal for the truncated rollout.
-
-3. The framework supports **step-level Generalized Advantage Estimation (GAE)**, decoupling step-level $\lambda_{\text{step}}, \gamma_{\text{step}}$ from token level $\lambda_{\text{token}}, \gamma_{\text{token}}$. This capability improves credit assignment accuracy and overall training efficiency.
-
-This setup is optimized specifically for LLM agents engaged in complex, long-term decision-making tasks.
-
-</p>
-
-## Results
-
-<p align="center">
-</p>
-
-## Getting Started
-
-
-
+We provide a simple example to get started with Verlog in `train.sbatch`

@@ -580,6 +580,7 @@ class RayPPOTrainer(object):
             #     'validate': True,
             # }
             
+            val_gen_batch.meta_info["step"] = None
             val_gen_batch_output = self.actor_rollout_wg.generate_sequences(val_gen_batch)
                         
             response_ids = val_gen_batch_output.batch['responses']
@@ -733,6 +734,8 @@ class RayPPOTrainer(object):
                                                            'latest_checkpointed_iteration.txt')
         with open(local_latest_checkpointed_iteration, 'w') as f:
             f.write(str(self.global_steps))
+            
+        exit()
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == 'disable':
@@ -913,7 +916,8 @@ class RayPPOTrainer(object):
                                     diff_size=True,
                                 )
                                 break
-                            
+                                
+                            gen_batch.meta_info["step"] = time_step if time_step < episode_len - 1 else -1
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                             
                             response_ids = gen_batch_output.batch['responses']

@@ -81,13 +81,22 @@ class CrafterLLMAgentsWrapper(gym.Wrapper):
             action = "Move West"
         elif action == "Mine Stone" or action == "Chop Tree" or action == "Drink":
             action = "Do"
+            
+        is_valid = action in self.language_action_space
+        valid_action = action if is_valid else self.default_action
+        
+        full_action = str(action)
+        if "ACTION:" in full_action:
+            full_action = full_action.split("ACTION:")[0].strip()
+        elif "action:" in action:
+            full_action = full_action.split("action:")[0].strip()
+        elif "Action" in full_action:
+            full_action = full_action.split("Action")[0].strip()
+        full_action += "ACTION: " + valid_action + ".\n"
         
         total_action_occurrences = 0
         for p_action in POSSIBLE_ACTIONS:
             total_action_occurrences += full_action.lower().count(p_action.lower())
-            
-        is_valid = action in self.language_action_space
-        valid_action = action if is_valid else self.default_action
         
         total_but_occurrences = 0
         for word in ["However", "different", "but", "wait", "won't", "can't", "cannot", "another"]:
