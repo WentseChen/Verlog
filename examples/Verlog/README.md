@@ -1,0 +1,53 @@
+# Supported Environments
+
+* env_name=babayai
+    * task=BabyAI-MixedTrainLocal-v0/goto
+    * task=BabyAI-MixedTrainLocal-v0/pickup
+    * task=BabyAI-MixedTrainLocal-v0/open
+    * task=BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to
+    * task=BabyAI-MixedTrainLocal-v0/putnext
+
+* env_name=babaisai
+    - task="env/goto_win-distr_obj"
+    - task="env/two_room-goto_win"
+    - task="env/two_room-goto_win-distr_obj_rule"
+    - task="env/two_room-maybe_break_stop-goto_win"
+    - task="env/goto_win"
+    - task="env/two_room-maybe_break_stop-goto_win-distr_obj"
+    - task="env/goto_win-distr_obj-irrelevant_rule"
+    - task="env/goto_win-distr_obj_rule"
+    - task="env/goto_win-distr_rule"
+    - task="env/two_room-break_stop-goto_win"
+    - task="env/two_room-goto_win-distr_obj"
+    - task="env/two_room-goto_win-distr_rule"
+    - task="env/make_win-distr_obj_rule"
+    - task="env/make_win-distr_obj"
+    - task="env/make_win-distr_rule"
+    - task="env/make_win"
+    - task="env/make_win-distr_obj-irrelevant_rule"
+    - task="env/two_room-goto_win-distr_obj-irrelevant_rule"
+    - task="env/two_room-goto_win-distr_win_rule"
+    - task="env/two_room-break_stop-goto_win-distr_obj_rule"
+    - task="env/two_room-break_stop-goto_win-distr_obj"
+    - task="env/two_room-break_stop-goto_win-distr_rule"
+    - task="env/two_room-break_stop-goto_win-distr_obj-irrelevant_rule"
+    - task="env/two_room-maybe_break_stop-goto_win-distr_obj_rule"
+    - task="env/two_room-maybe_break_stop-goto_win-distr_rule"
+    - task="env/two_room-maybe_break_stop-goto_win-distr_obj-irrelevant_rule"
+    - task="env/two_room-make_win-distr_obj_rule"
+    - task="env/two_room-make_win-distr_rule"
+    - task="env/two_room-make_win"
+    - task="env/two_room-make_win-distr_obj-irrelevant_rule"
+    - task="env/two_room-make_win-distr_obj"
+    - task="env/two_room-make_win-distr_win_rule"
+    - task="env/two_room-break_stop-make_win-distr_obj_rule"
+    - task="env/two_room-break_stop-make_win-distr_rule"
+    - task="env/two_room-break_stop-make_win"
+    - task="env/two_room-break_stop-make_win-distr_obj-irrelevant_rule"
+    - task="env/two_room-break_stop-make_win-distr_obj"
+    - task="env/two_room-make_you"
+    - task="env/two_room-make_you-make_win"
+    - task="env/two_room-make_wall_win"
+
+* env_name=crafter
+    - task="default"

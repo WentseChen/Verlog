@@ -4,7 +4,7 @@ from typing import Optional
 import gymnasium as gym
 import minigrid
 
-from verl.envs.environments.babyai_text import BabyAITextCleanLangWrapper
+from verl.envs.environments.babyai_text import BabyAITextCleanLangWrapper, BabyAILLMAgentsWrapper
 
 minigrid.register_minigrid_envs()
 
@@ -43,5 +43,6 @@ def make_babyai_env(env_name, task, config, render_mode: Optional[str] = None):
                 break
 
     env = BabyAITextCleanLangWrapper(env, **config.envs.babyai_kwargs)
+    env = BabyAILLMAgentsWrapper(env, **config.envs)
 
     return env

@@ -1,7 +1,7 @@
 class BaseCaptioner:
     """Base class for captioners using prompt-based interactions."""
 
-    def __init__(self, prompt_builder):
+    def __init__(self, prompt_builder, env_name=None):
         """Initialize the agent with a client and prompt builder."""
         self.prompt_builder = prompt_builder
 

@@ -1,6 +1,7 @@
-from balrog.environments.babaisai.base import BabaIsAIWrapper
+from verl.envs.environments.babaisai.base import BabaIsAIWrapper
+from verl.envs.environments.babaisai.llm_agents_wrapper import BabaIsAILLMAgentsWrapper
 
-__all__ = [BabaIsAIWrapper]
+__all__ = [BabaIsAIWrapper, BabaIsAILLMAgentsWrapper]
 
 
 ACTIONS = {

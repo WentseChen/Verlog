@@ -3,8 +3,9 @@ from typing import Optional
 import gym
 import minihack  # NOQA: F401
 
-from balrog.environments.nle import AutoMore, NLELanguageWrapper
-from balrog.environments.wrappers import GymV21CompatibilityV0, NLETimeLimit
+from verl.envs.environments.nle import AutoMore, NLELanguageWrapper
+from verl.envs.environments.wrappers import GymV21CompatibilityV0, NLETimeLimit
+from verl.envs.environments.minihack.llm_agents_wrapper import MiniHackLLMAgentsWrapper
 
 MINIHACK_ENVS = []
 for env_spec in gym.envs.registry.all():
@@ -16,7 +17,7 @@ for env_spec in gym.envs.registry.all():
 def make_minihack_env(env_name, task, config, render_mode: Optional[str] = None):
     minihack_kwargs = dict(config.envs.minihack_kwargs)
     skip_more = minihack_kwargs.pop("skip_more", False)
-    vlm = True if config.agent.max_image_history > 0 else False
+    vlm = True if config.envs.captioner.max_image_history > 0 else False
     env = gym.make(
         task,
         observation_keys=[
@@ -38,5 +39,6 @@ def make_minihack_env(env_name, task, config, render_mode: Optional[str] = None)
     env = NLETimeLimit(env)
 
     env = GymV21CompatibilityV0(env=env, render_mode=render_mode)
+    env = MiniHackLLMAgentsWrapper(env)
 
     return env

@@ -22,8 +22,8 @@ class EnvWrapper(gym.Wrapper):
         obs, info = self.env.reset(**kwargs)
         return self._process_observation(obs), info
 
-    def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
+    def step(self, action, is_valid=True):
+        obs, reward, terminated, truncated, info = self.env.step(action, is_valid)
         processed_obs = self._process_observation(obs)
         return processed_obs, reward, terminated, truncated, info
 
@@ -51,13 +51,13 @@ class EnvWrapper(gym.Wrapper):
     def get_text_action(self, action):
         return self.env.get_text_action(action)
 
-    def get_instruction_prompt(self, instructions=None):
+    def get_instruction_prompt(self, instructions=None, info=None):
         if self.env_name == "nle":
-            from balrog.environments.nle import get_instruction_prompt
+            from verl.envs.environments.nle import get_instruction_prompt
 
             return get_instruction_prompt()
         elif self.env_name == "minihack":
-            from balrog.environments.minihack import get_instruction_prompt
+            from verl.envs.environments.minihack import get_instruction_prompt
 
             return get_instruction_prompt(self.env, self.task_name)
         elif self.env_name == "babyai":
@@ -65,17 +65,17 @@ class EnvWrapper(gym.Wrapper):
 
             return get_instruction_prompt(self.env, mission=instructions)
         elif self.env_name == "textworld":
-            from balrog.environments.textworld import get_instruction_prompt
+            from verl.envs.environments.textworld import get_instruction_prompt
 
             return get_instruction_prompt(self.env, self.task_name)
         elif self.env_name == "babaisai":
-            from balrog.environments.babaisai import get_instruction_prompt
+            from verl.envs.environments.babaisai import get_instruction_prompt
 
             return get_instruction_prompt(self.env, self.task_name)
         elif self.env_name == "crafter":
-            from balrog.environments.crafter import get_instruction_prompt
+            from verl.envs.environments.crafter import get_instruction_prompt
 
-            return get_instruction_prompt(self.task_name)
+            return get_instruction_prompt(self.task_name, info)
         else:
             raise ValueError(f"Unknown environment: {self.env_namee}")
 
@@ -90,3 +90,6 @@ class EnvWrapper(gym.Wrapper):
 
     def get_stats(self):
         return self.env.get_stats()
+    
+    def extract_action(self, action):
+        return self.env.extract_action(action)

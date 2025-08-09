@@ -5,7 +5,7 @@ import gym
 import numpy as np
 from PIL import Image
 
-from balrog.environments import Strings
+from verl.envs.environments import Strings
 
 ACTIONS = [
     "Noop",
@@ -112,7 +112,7 @@ def describe_env(info):
     target_y = center[1] + facing[1]
 
     if 0 <= target_x < max_x and 0 <= target_y < max_y:
-        target_id = semantic[int(target_y), int(target_x)]
+        target_id = semantic[int(target_x), int(target_y)]
         target_item = id_to_item[target_id]
         obs = "You face {} at your front.".format(target_item)
     else:
@@ -226,6 +226,8 @@ class CrafterLanguageWrapper(gym.Wrapper):
 
     def step(self, action):
         obs, reward, done, info = self._step_impl(self.language_action_space.map(action))
+        while info["sleeping"]:
+            obs, reward, done, info = self._step_impl(np.random.randint(0, 17))
         self.score_tracker = self.update_progress(info)
         obs = self.process_obs(obs, info)
         return obs, reward, done, info

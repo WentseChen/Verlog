@@ -1,5 +1,4 @@
-from ..prompt_builder import create_prompt_builder
-
+from .prompt_builder import create_prompt_builder
 
 def make_captioner(config):
     """Create a captioner agent based on the provided configuration.
@@ -11,12 +10,13 @@ def make_captioner(config):
         Agent: An instance of the selected agent type, configured with the client and prompt builder.
     """
     prompt_builder = create_prompt_builder(config.envs.captioner)
+    env_name = config.envs.env_name
 
     if config.envs.captioner.type == "naive":
         from .naive import NaiveCaptioner
-        return NaiveCaptioner(prompt_builder)
+        return NaiveCaptioner(prompt_builder, env_name)
     elif config.envs.captioner.type == "cot":
         from .cot import COTCaptioner
-        return COTCaptioner(prompt_builder)
+        return COTCaptioner(prompt_builder, env_name)
     else:
         raise ValueError(f"Unknown captioner type: {config.captioner.type}")

@@ -5,7 +5,7 @@ from nle.language_wrapper.wrappers import nle_language_wrapper as language_wrapp
 from nle.nethack import USEFUL_ACTIONS
 from PIL import Image
 
-from balrog.environments import Strings
+from verl.envs.environments import Strings
 
 from ..minihack import ACTIONS as MINIHACK_ACTIONS
 from .progress import get_progress_system
