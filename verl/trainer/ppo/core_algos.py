@@ -63,8 +63,17 @@ def get_kl_controller(kl_ctrl):
         raise NotImplementedError
 
 
-def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torch.Tensor, response_mask: torch.Tensor,
-                                 gamma: torch.Tensor, lam: torch.Tensor):
+def compute_gae_advantage_return(
+        token_level_rewards: torch.Tensor, 
+        values: torch.Tensor,
+        response_mask: torch.Tensor,
+        token_gamma: torch.Tensor, 
+        step_gamma: torch.Tensor, 
+        dones: torch.Tensor, 
+        token_lam: torch.Tensor, 
+        step_lam: torch.Tensor,
+        n_rollouts: int = 2
+    ):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
     Args:
@@ -74,10 +83,16 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
             shape: (bs, response_length)
         response_mask: `(torch.Tensor)`
             shape: (bs, response_length). [EOS] mask. The token after [EOS] have mask zero.
-        gamma: `(float)`
-            discounted factor used in RL
+        token_gamma: `(float)`
+            discounted factor used in RL (on sequence dimension)
+        step_gamma: `(float)`
+            discounted factor used in RL (on episode dimension)
+        dones: `(torch.Tensor)`
+            shape: (bs, response_length). The episode ends at the step where the value is 1.0.
         lam: `(float)`
             lambda value when computing Generalized Advantage Estimation (https://arxiv.org/abs/1506.02438)
+        n_rollouts: `(int)`
+            number of rollouts in the batch. The batch size is `episode_len * n_rollouts`.
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -87,17 +102,55 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
 
     """
     with torch.no_grad():
-        lastgaelam = 0
-        advantages_reversed = []
-        gen_len = token_level_rewards.shape[-1]
-
-        for t in reversed(range(gen_len)):
-            nextvalues = values[:, t + 1] if t < gen_len - 1 else 0.0
-            delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
-            lastgaelam = delta + gamma * lam * lastgaelam
-            advantages_reversed.append(lastgaelam)
-        advantages = torch.stack(advantages_reversed[::-1], dim=1)
-
+        
+        _, gen_len = values.shape        
+        batch_values = values.reshape(-1, n_rollouts, gen_len)
+        batch_rewards = token_level_rewards.reshape(-1, n_rollouts, gen_len)
+        batch_dones = dones.reshape(-1, n_rollouts)
+        batch_response_mask = response_mask.reshape(-1, n_rollouts, gen_len)
+        
+        episode_len, _, gen_len = batch_values.shape
+        
+        # Placeholder for the final step of the episode.
+        # This step will be discarded during policy training.
+        all_advantages_reversed = [torch.zeros_like(batch_values[0])]
+        
+        gae = 0
+        next_values = batch_values[episode_len-1, :, 0]
+        
+        for env_t in reversed(range(episode_len - 1)):
+            advantages_reversed = []
+            
+            gamma = step_gamma
+            lam = step_lam
+            done_t = batch_dones[env_t] # done=1, not done=0
+            gae = (1 - done_t) * gae
+            
+            for token_t in reversed(range(gen_len)):
+                
+                rew_t = batch_rewards[env_t, :, token_t]
+                v_t = batch_values[env_t, :, token_t]
+                
+                # response (need gradient update) = 1, pad_token = 0 
+                # Note that in critic trainer, response_mask = attention_mask[:, -response_length - 1:-1]
+                # While in ray_trainer and here, response_mask = attention_mask[:, -response_length:]
+                update_t = 1 if token_t == 0 else batch_response_mask[env_t, :, token_t-1]
+                
+                delta = rew_t + gamma * next_values * (1 - done_t) - v_t
+                gae = (delta + gamma * lam * gae) * update_t + gae * (1 - update_t)
+                advantages_reversed.append(gae * update_t)
+                
+                next_values = v_t * update_t + next_values * (1 - update_t)
+                done_t = done_t * (1 - update_t) # only mask the last token in the sequence (env done)
+                gamma = token_gamma * update_t + step_gamma * (1 - update_t) # use step gamma only for the last token
+                lam = token_lam * update_t + step_lam * (1 - update_t) # use step lambda only for the last token
+                
+            advantages_reversed = torch.stack(advantages_reversed, dim=-1)
+            step_advantage = torch.flip(advantages_reversed, dims=[-1])
+            all_advantages_reversed.append(step_advantage)
+        all_advantages_reversed = torch.stack(all_advantages_reversed, dim=0)
+        all_advantages = torch.flip(all_advantages_reversed, dims=[0])
+        advantages = all_advantages.reshape(-1, gen_len)
         returns = advantages + values
         advantages = verl_F.masked_whiten(advantages, response_mask)
     return advantages, returns
@@ -421,7 +474,7 @@ def compute_entropy_loss(logits, response_mask):
     return entropy_loss
 
 
-def compute_value_loss(vpreds, returns, values, response_mask, cliprange_value):
+def compute_value_loss(vpreds, returns, values, response_mask, cliprange_value, highlight_first=False, highlight_ratio=5.0):
     """Compute the value loss. Copied from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1151
 
     Args:
@@ -442,7 +495,12 @@ def compute_value_loss(vpreds, returns, values, response_mask, cliprange_value):
     vpredclipped = verl_F.clip_by_value(vpreds, values - cliprange_value, values + cliprange_value)
     vf_losses1 = (vpreds - returns)**2
     vf_losses2 = (vpredclipped - returns)**2
-    vf_loss = 0.5 * verl_F.masked_mean(torch.max(vf_losses1, vf_losses2), response_mask)
+    
+    vf_loss = torch.max(vf_losses1, vf_losses2)
+    if highlight_first:
+        vf_loss[:, 0] *= highlight_ratio
+    
+    vf_loss = 0.5 * verl_F.masked_mean(vf_loss, response_mask)
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), response_mask)
     return vf_loss, vf_clipfrac
 

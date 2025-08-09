@@ -1,7 +1,7 @@
 data:
   tokenizer: null
-  train_files: ~/data/rlhf/gsm8k/train.parquet
-  val_files: ~/data/rlhf/gsm8k/test.parquet
+  train_files: examples/data/placeholder.parquet
+  val_files: examples/data/placeholder.parquet
   prompt_key: prompt
   reward_fn_key: data_source
   max_prompt_length: 512
@@ -155,6 +155,8 @@ critic:
   shuffle: ${actor_rollout_ref.actor.shuffle}
   grad_clip: 1.0
   cliprange_value: 0.5
+  highlight_first: False
+  highlight_ratio: 5.0
   checkpoint:
     contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
 
@@ -184,8 +186,10 @@ custom_reward_function:
   name: compute_score
 
 algorithm:
-  gamma: 1.0
-  lam: 1.0
+  step_gamma: 1.0
+  step_lam: 1.0
+  token_gamma: 1.0
+  token_lam: 1.0
   adv_estimator: gae
   use_kl_in_reward: False
   kl_penalty: kl  # how to estimate kl divergence
@@ -196,13 +200,13 @@ algorithm:
     target_kl: 0.1
 
 trainer:
-  balance_batch: True
+  balance_batch: False # TODO: add balance_batch
   total_epochs: 30
   total_training_steps: null
   project_name: verl_examples
   experiment_name: gsm8k
   logger: [ 'console', 'wandb' ]
-  log_val_generations: 0
+  log_val_generations: 1 # log one msg per validation step
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
@@ -212,6 +216,7 @@ trainer:
   val_before_train: True
   test_freq: -1
   critic_warmup: 0
+  critic_warmup_step: 0
   default_hdfs_dir: null
   del_local_ckpt_after_load: False
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
@@ -219,3 +224,39 @@ trainer:
   max_critic_ckpt_to_keep: null
   # The timeout for ray worker group to wait for the register center to be ready
   ray_wait_register_center_timeout: 300
+  render: False
+  render_path: null
+
+envs:
+  n_rollouts: 16
+  env_name: babyai
+  task: BabyAI-MixedTrainLocal-v0/goto
+  format_penalty: 0.0
+  binary_reward: False
+  captioner:
+    type: naive
+    max_text_history: 1
+    max_cot_history: 1
+    max_image_history: 0
+  babyai_kwargs:
+    num_dists: 0
+    # max_steps: 64
+  babaisai_kwargs: 
+    add_ruleset: True
+  crafter_kwargs:
+    area: [64, 64]              
+    view: [9, 9]            
+    size: [256, 256] # Image size in Crafter
+    reward: True                       
+    seed: null                  
+    max_episode_steps: 2000  
+  minihack_kwargs: 
+    character: "@"
+    max_episode_steps: 100
+    penalty_step: -0.01         
+    penalty_time: 0.0           
+    penalty_mode: constant      
+    savedir: null
+    save_ttyrec_every: 0
+    autopickup: False           
+    skip_more: True
