@@ -11,7 +11,8 @@
 #SBATCH --time=47:59:59
 #SBATCH --gpus-per-node=4
 
-cd verlog
+cd Verlog
+conda activate verlog
 
 model=Qwen/Qwen2.5-3B-Instruct
 micro_batch_size=8
@@ -36,7 +37,7 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
  algorithm.use_kl_in_reward=True \
  algorithm.kl_ctrl.kl_coef=0.001 \
  envs.n_rollouts=32 \
- envs.env_name=babayai \
+ envs.env_name=babyai \
  envs.task=BabyAI-MixedTrainLocal-v0/goto \
  envs.format_penalty=0.1 \
  envs.binary_reward=True \

@@ -11,7 +11,8 @@
 #SBATCH --time=47:59:59
 #SBATCH --gpus-per-node=4
 
-cd verlog
+cd Verlog
+conda activate verlog
 
 model=Qwen/Qwen2.5-3B-Instruct
 micro_batch_size=8

@@ -12,7 +12,8 @@
 #SBATCH --gres=gpu:8
 #SBATCH --gpus-per-node=4
 
-cd verlog
+cd Verlog
+conda activate verlog
 
 model=Qwen/Qwen2.5-7B-Instruct
 micro_batch_size=8
