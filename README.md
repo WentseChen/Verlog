@@ -1,7 +1,5 @@
-<h1 style="text-align: center;">Verlog</h1>
+<h1 style="text-align: center;">Verlog: A Multi-turn RL framework for LLM agents</h1>
 
-<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
-<script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 
 <div style="display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 24px; width: 100%;">
   <a href="https://wentsechen.github.io/Verlog_blogpost/" target="_blank" style="text-decoration: none; display: flex; align-items: center;">
