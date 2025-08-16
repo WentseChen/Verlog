@@ -50,7 +50,7 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
  trainer.val_before_train=False \
  trainer.critic_warmup=20 \
  trainer.critic_warmup_step=20 \
- trainer.n_gpus_per_node=4 \
+ trainer.n_gpus_per_node=8 \
  trainer.nnodes=1 \
  trainer.save_freq=1000 \
  trainer.test_freq=1000 \
