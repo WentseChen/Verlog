@@ -17,10 +17,10 @@ data:
   # The program will read all files into memory, so it can't be too large (< 100GB).
   # The path can be either a local path or an HDFS path.
   # For HDFS path, we provide utils to download it to DRAM and convert it to a local path.
-  train_files: ~/data/rlhf/gsm8k/train.parquet
+  train_files: /u/wchen11/data/gsm8k/train.parquet
 
   # Validation parquet. Can be a list or a single file.
-  val_files: ~/data/rlhf/gsm8k/test.parquet
+  val_files: /u/wchen11/data/gsm8k/test.parquet
 
   # The field in the dataset where the prompt is located. Default is 'prompt'.
   prompt_key: prompt

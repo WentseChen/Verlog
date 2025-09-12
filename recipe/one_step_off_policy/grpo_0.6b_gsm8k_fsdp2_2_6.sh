@@ -5,17 +5,18 @@ exp_name='GRPO-Qwen3-0.6b-gsm8k-fsdp2-one-step-off-2-6'
 
 # Paths
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
-MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-0.6B"}
+MODEL_PATH=Qwen/Qwen2.5-0.5B-Instruct
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/gsm8k/train.parquet"}
-TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/gsm8k/test.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"${HOME}/data/gsm8k/train.parquet"}
+TEST_FILE=${TEST_FILE:-"${HOME}/data/gsm8k/test.parquet"}
 
 NNODES=${NNODES:-1}
-NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+NGPUS_PER_NODE=${NGPUS_PER_NODE:-2}
 
-n_gpus_rollout=2
+n_gpus_rollout=1
 n_gpus_training=$((NGPUS_PER_NODE - n_gpus_rollout))
 
+cd "${RAY_DATA_HOME}" 
 
 python3 -m recipe.one_step_off_policy.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -42,7 +43,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=5 \
@@ -53,7 +54,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.val_before_train=True \
-    trainer.logger=['console','tensorboard'] \
+    trainer.logger=['console','wandb'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.save_freq=-1 \
