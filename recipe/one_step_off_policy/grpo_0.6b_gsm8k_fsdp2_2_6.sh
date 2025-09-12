@@ -19,7 +19,7 @@ n_gpus_training=$((NGPUS_PER_NODE - n_gpus_rollout))
 cd "${RAY_DATA_HOME}" 
 
 python3 -m recipe.one_step_off_policy.main_ppo \
-    algorithm.adv_estimator=grpo \
+    algorithm.adv_estimator=gae \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.train_batch_size=1152 \
@@ -29,6 +29,8 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     data.truncation='error' \
     actor_rollout_ref.actor.strategy=fsdp2 \
     critic.strategy=fsdp2 \
+    critic.ppo_micro_batch_size_per_gpu=32 \
+    critic.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.hybrid_engine=False \

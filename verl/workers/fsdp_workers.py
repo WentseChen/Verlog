@@ -718,6 +718,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     @DistProfiler.annotate(color="red", role="rollout_generate")
     def generate_sequences(self, prompts: DataProto):
+        
+        print("enter fsdp rollout generate")
+        
         # Support all hardwares
         prompts = prompts.to(get_device_id())
 
@@ -738,6 +741,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
             with simple_timer("generate_sequences", timing_generate):
+                print("self.rollout:", self.rollout)
                 output = self.rollout.generate_sequences(prompts=prompts)
 
             log_gpu_memory_usage("After rollout generation", logger=logger)
