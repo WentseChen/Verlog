@@ -219,6 +219,7 @@ def compute_advantage(
     num_repeat: int = 1,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
+    n_rollouts: int = 32,
 ) -> DataProto:
     """Compute advantage estimates for policy optimization.
 
@@ -255,6 +256,7 @@ def compute_advantage(
             response_mask=data.batch["response_mask"],
             gamma=gamma,
             lam=lam,
+            n_rollouts=n_rollouts,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns

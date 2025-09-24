@@ -53,7 +53,7 @@ megatron:
 
   optimizer_offload: False
 
-  tensor_model_parallel_size: 1
+  tensor_model_parallel_size: 2
 
   expert_model_parallel_size: 1
 

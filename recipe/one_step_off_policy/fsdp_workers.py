@@ -23,6 +23,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from transformers import AutoConfig
 
+import ray
+
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils import hf_processor, hf_tokenizer, omega_conf_to_dataclass
@@ -215,8 +217,14 @@ class RolloutWorker(ActorRolloutRefWorker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO, blocking=False)
     def async_generate_sequences(self, *args, **kwargs):
-        return super().generate_sequences(*args, **kwargs)
-
+        generate_method = super().generate_sequences
+        def my_generate(*args, **kwargs):
+            result = generate_method(*args, **kwargs)
+            while hasattr(result, 'get') and callable(getattr(result, 'get')):
+                result = result.get()
+            return result
+        return my_generate(*args, **kwargs)
+    
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_actor_weights_info(self, weights_info):
         assert self._is_rollout

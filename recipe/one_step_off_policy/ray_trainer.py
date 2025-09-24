@@ -547,10 +547,11 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         num_repeat=self.config.actor_rollout_ref.rollout.n,
                         norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                         config=self.config.algorithm,
+                        n_rollouts=self.config.actor_rollout_ref.envs.get("n_rollouts", 8),
                     )
 
                 # TODO: slice on the different axis
-                episode_len = 8
+                episode_len = self.config.actor_rollout_ref.envs.get("episode_length", 8)
                 batch4train = dict()
                 for key in batch.batch.keys():
                     batch_data = batch.batch[key]

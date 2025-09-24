@@ -81,7 +81,7 @@ megatron:
   optimizer_offload: False
 
   # size of tensor model parallel group
-  tensor_model_parallel_size: 1
+  tensor_model_parallel_size: 2
 
   # size of expert model parallel group
   expert_model_parallel_size: 1

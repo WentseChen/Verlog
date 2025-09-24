@@ -1,6 +1,19 @@
-source /u/wchen11/anaconda3/bin/activate 
+#!/bin/bash
+#SBATCH --job-name=async_picksgoto
+#SBATCH --output=logs/slurm-%j.out
+#SBATCH --error=logs/slurm-%j.err
+#SBATCH --mem=0
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --partition=gpuA40x4
+#SBATCH --account=bezc-delta-gpu
+#SBATCH --time=47:59:59
+#SBATCH --gpus-per-node=4
+
+source anaconda3/bin/activate
 conda activate verl
-cd /u/wchen11/verl/recipe/one_step_off_policy
+cd verl/recipe/one_step_off_policy/
 
 cache_dir=/projects/bezc/wchen11
 export HF_HOME=$cache_dir
@@ -47,7 +60,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.hybrid_engine=False \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=252 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=126 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${micro_batch_size_per_gpu} \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
@@ -65,6 +78,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${micro_batch_size_per_gpu} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    actor_rollout_ref.envs.task=BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to \
     algorithm.use_kl_in_reward=True \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.critic_warmup=40 \

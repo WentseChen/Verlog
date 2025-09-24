@@ -198,6 +198,7 @@ def compute_gae_advantage_return(
     response_mask: torch.Tensor,
     gamma: torch.Tensor,
     lam: torch.Tensor,
+    n_rollouts: int = 32,
 ):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
@@ -223,7 +224,6 @@ def compute_gae_advantage_return(
     
     with torch.no_grad():
         
-        n_rollouts = 32
         _, gen_len = values.shape        
         batch_values = values.reshape(n_rollouts, -1, gen_len)
         batch_rewards = token_level_rewards.reshape(n_rollouts, -1, gen_len)

@@ -60,7 +60,7 @@ fsdp_config:
   optimizer_offload: false
 
   # Only for FSDP2: offload param/grad/optimizer during train
-  offload_policy: false
+  offload_policy: optimizer
 
   # Only for FSDP2: Reshard after forward pass to reduce memory footprint
   reshard_after_forward: true

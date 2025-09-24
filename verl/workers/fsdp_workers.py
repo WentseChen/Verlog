@@ -849,7 +849,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         else:
             obs = self.last_obs
         
-        episode_len = 8 if not is_eval else 1000
+        episode_len = self.config.envs.get("episode_length", 8)
+        episode_len = episode_len if not is_eval else 1000
         all_outputs = []
         metrics = {}
         

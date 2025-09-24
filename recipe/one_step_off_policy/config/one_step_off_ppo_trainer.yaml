@@ -11,18 +11,19 @@ rollout:
   # Number of nodes used in the rollout
   nnodes: 1
   # Number of GPUs per node
-  n_gpus_per_node: 8
+  n_gpus_per_node: 4
 
 actor_rollout_ref:
   envs:
-    n_rollouts: 32
+    n_rollouts: 36
+    episode_length: 7
     env_name: babyai
-    task: BabyAI-MixedTrainLocal-v0/goto
-    format_penalty: 0.0
-    binary_reward: False
+    task: BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to
+    format_penalty: 0.1
+    binary_reward: True
     use_nlp_metrics: False
     captioner:
-      type: naive
+      type: cot
       max_text_history: 1
       max_cot_history: 1
       max_image_history: 0
