@@ -193,6 +193,7 @@ def get_kl_controller(kl_ctrl):
 @register_adv_est(AdvantageEstimator.GAE)  # or simply: @register_adv_est("gae")
 def compute_gae_advantage_return(
     token_level_rewards: torch.Tensor,
+    dones: torch.Tensor,
     values: torch.Tensor,
     response_mask: torch.Tensor,
     gamma: torch.Tensor,
@@ -219,26 +220,87 @@ def compute_gae_advantage_return(
             shape: (bs, response_length)
 
     """
+    
     with torch.no_grad():
-        nextvalues = 0
-        lastgaelam = 0
-        advantages_reversed = []
-        gen_len = token_level_rewards.shape[-1]
-
-        for t in reversed(range(gen_len)):
-            delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
-            lastgaelam_ = delta + gamma * lam * lastgaelam
-
-            # skip values and TD-error on observation tokens
-            nextvalues = values[:, t] * response_mask[:, t] + (1 - response_mask[:, t]) * nextvalues
-            lastgaelam = lastgaelam_ * response_mask[:, t] + (1 - response_mask[:, t]) * lastgaelam
-
-            advantages_reversed.append(lastgaelam)
-        advantages = torch.stack(advantages_reversed[::-1], dim=1)
-
+        
+        n_rollouts = 32
+        _, gen_len = values.shape        
+        batch_values = values.reshape(n_rollouts, -1, gen_len)
+        batch_rewards = token_level_rewards.reshape(n_rollouts, -1, gen_len)
+        batch_dones = dones.reshape(n_rollouts, -1)
+        batch_response_mask = response_mask.reshape(n_rollouts, -1, gen_len)
+        
+        _, episode_len, gen_len = batch_values.shape
+        
+        # Placeholder for the final step of the episode.
+        # This step will be discarded during policy training.
+        all_advantages_reversed = [torch.zeros_like(batch_values[:,0])]
+        
+        token_gamma = 1.0
+        step_gamma = 0.99
+        token_lam = 1.0
+        step_lam = 0.95
+        
+        gae = 0
+        next_values = batch_values[:, episode_len-1, 0]
+        
+        for env_t in reversed(range(episode_len - 1)):
+            advantages_reversed = []
+            
+            gamma = step_gamma
+            lam = step_lam
+            done_t = batch_dones[:, env_t] # done=1, not done=0
+            gae = (1 - done_t) * gae
+            
+            for token_t in reversed(range(gen_len)):
+                
+                rew_t = batch_rewards[:, env_t, token_t]
+                v_t = batch_values[:, env_t, token_t]
+                
+                # response (need gradient update) = 1, pad_token = 0 
+                # Note that in critic trainer, response_mask = attention_mask[:, -response_length - 1:-1]
+                # While in ray_trainer and here, response_mask = attention_mask[:, -response_length:]
+                update_t = 1 if token_t == 0 else batch_response_mask[:, env_t, token_t-1]
+                
+                delta = rew_t + gamma * next_values * (1 - done_t) - v_t
+                gae = (delta + gamma * lam * gae) * update_t + gae * (1 - update_t)
+                advantages_reversed.append(gae * update_t)
+                
+                next_values = v_t * update_t + next_values * (1 - update_t)
+                done_t = done_t * (1 - update_t) # only mask the last token in the sequence (env done)
+                gamma = token_gamma * update_t + step_gamma * (1 - update_t) # use step gamma only for the last token
+                lam = token_lam * update_t + step_lam * (1 - update_t) # use step lambda only for the last token
+                
+            advantages_reversed = torch.stack(advantages_reversed, dim=-1)
+            step_advantage = torch.flip(advantages_reversed, dims=[-1])
+            all_advantages_reversed.append(step_advantage)
+        all_advantages_reversed = torch.stack(all_advantages_reversed, dim=1)
+        all_advantages = torch.flip(all_advantages_reversed, dims=[1])
+        advantages = all_advantages.reshape(-1, gen_len)
         returns = advantages + values
         advantages = verl_F.masked_whiten(advantages, response_mask)
     return advantages, returns
+    
+    # with torch.no_grad():
+    #     nextvalues = 0
+    #     lastgaelam = 0
+    #     advantages_reversed = []
+    #     gen_len = token_level_rewards.shape[-1]
+
+    #     for t in reversed(range(gen_len)):
+    #         delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
+    #         lastgaelam_ = delta + gamma * lam * lastgaelam
+
+    #         # skip values and TD-error on observation tokens
+    #         nextvalues = values[:, t] * response_mask[:, t] + (1 - response_mask[:, t]) * nextvalues
+    #         lastgaelam = lastgaelam_ * response_mask[:, t] + (1 - response_mask[:, t]) * lastgaelam
+
+    #         advantages_reversed.append(lastgaelam)
+    #     advantages = torch.stack(advantages_reversed[::-1], dim=1)
+
+    #     returns = advantages + values
+    #     advantages = verl_F.masked_whiten(advantages, response_mask)
+    # return advantages, returns
 
 
 # NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.

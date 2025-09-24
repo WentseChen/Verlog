@@ -27,6 +27,7 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
+import copy
 
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
@@ -53,7 +54,6 @@ from verl.utils.metric import (
     reduce_metrics,
 )
 from verl.utils.tracking import ValidationGenerationsLogger
-
 
 class GenerationBatchFuture:
     """
@@ -86,7 +86,6 @@ class GenerationBatchFuture:
             gen_batch_result = self.gen_batch_output
 
         return self.epoch, self.batch, gen_batch_result
-
 
 class OneStepOffRayTrainer(RayPPOTrainer):
     # TODO: support each role have individual ray_worker_group_cls,
@@ -421,36 +420,38 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                 with marked_timer("sync_rollout_weights", timing_raw, color="purple"):
                     if not is_last_step:
                         batch_data_future = self._async_gen_next_batch(continuous_iterator)
+                        
+                # batch.non_tensor_batch["uid"] = np.array(
+                #     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
+                # )
+                # # repeat to align with repeated responses in rollout
+                # batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                # batch = batch.union(gen_batch_output)
 
-                batch.non_tensor_batch["uid"] = np.array(
-                    [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
-                )
-                # repeat to align with repeated responses in rollout
-                batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                batch = batch.union(gen_batch_output)
-
+                batch = gen_batch_output
                 batch.batch["response_mask"] = compute_response_mask(batch)
-                # Balance the number of valid tokens across DP ranks.
-                # NOTE: This usually changes the order of data in the `batch`,
-                # which won't affect the advantage calculation (since it's based on uid),
-                # but might affect the loss calculation (due to the change of mini-batching).
-                # TODO: Decouple the DP balancing and mini-batching.
-                if self.config.trainer.balance_batch:
-                    self._balance_batch(batch, metrics=metrics)
+                
+                # # Balance the number of valid tokens across DP ranks.
+                # # NOTE: This usually changes the order of data in the `batch`,
+                # # which won't affect the advantage calculation (since it's based on uid),
+                # # but might affect the loss calculation (due to the change of mini-batching).
+                # # TODO: Decouple the DP balancing and mini-batching.
+                # if self.config.trainer.balance_batch:
+                #     self._balance_batch(batch, metrics=metrics)
 
                 # compute global_valid tokens
                 batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
-                with marked_timer("reward", timing_raw, color="yellow"):
-                    # compute reward model score
-                    if self.use_rm:
-                        reward_tensor = self.rm_wg.compute_rm_score(batch)
-                        batch = batch.union(reward_tensor)
+                # with marked_timer("reward", timing_raw, color="yellow"):
+                #     # compute reward model score
+                #     if self.use_rm:
+                #         reward_tensor = self.rm_wg.compute_rm_score(batch)
+                #         batch = batch.union(reward_tensor)
 
-                    if self.config.reward_model.launch_reward_fn_async:
-                        future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
-                    else:
-                        reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                #     if self.config.reward_model.launch_reward_fn_async:
+                #         future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
+                #     else:
+                #         reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
                 # recompute old_log_probs
                 with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -487,7 +488,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                                 "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
                             }
                         )
-
+                
                 if self.use_reference_policy:
                     # compute reference log_prob
                     with marked_timer("ref", timing_raw, color="olive"):
@@ -502,16 +503,26 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                     with marked_timer("values", timing_raw, color="cyan"):
                         values = self.critic_wg.compute_values(batch)
                         batch = batch.union(values)
-
+                
+                batch.batch['token_level_rewards'] = torch.zeros_like(batch.batch['response_mask'], dtype=torch.float64)
+                seq_len = batch.batch['response_mask'].sum(-1) - 1
+                indices = torch.arange(batch.batch['response_mask'].shape[0], device=seq_len.device)
+                reward_np = batch.non_tensor_batch['reward']
+                batch.batch['token_level_rewards'][indices, seq_len] = torch.tensor(reward_np, dtype=torch.float64, device=seq_len.device)
+                batch.batch['token_level_scores'] = batch.batch['token_level_rewards'].clone() 
+                
                 with marked_timer("adv", timing_raw, color="brown"):
-                    # we combine with rule-based rm
-                    reward_extra_infos_dict: dict[str, list]
-                    if self.config.reward_model.launch_reward_fn_async:
-                        reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
-                    batch.batch["token_level_scores"] = reward_tensor
-
-                    if reward_extra_infos_dict:
-                        batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                    
+                    #### reward_tensor has been computed in the previous step (3 lines above)
+                    # # we combine with rule-based rm
+                    # reward_extra_infos_dict: dict[str, list]
+                    # if self.config.reward_model.launch_reward_fn_async:
+                    #     reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                    # batch.batch["token_level_scores"] = reward_tensor
+                    # batch.batch["token_level_scores"] = torch.zeros_like(batch.batch["input_ids"]).float()
+                    # if reward_extra_infos_dict:
+                    #     batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                    #########################################################
 
                     # compute rewards. apply_kl_penalty if available
                     if self.config.algorithm.use_kl_in_reward:
@@ -538,6 +549,27 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         config=self.config.algorithm,
                     )
 
+                # TODO: slice on the different axis
+                episode_len = 8
+                batch4train = dict()
+                for key in batch.batch.keys():
+                    batch_data = batch.batch[key]
+                    batch_data = batch_data.view(-1, episode_len+1, *batch_data.shape[1:])
+                    batch_data = batch_data[:,:-1].contiguous()
+                    batch4train[key] = batch_data.view(-1, *batch_data.shape[2:])
+                for key in batch.non_tensor_batch.keys():
+                    batch_data = batch.non_tensor_batch[key]
+                    batch_data = batch_data.reshape(-1, episode_len+1, *batch_data.shape[1:])
+                    batch_data = batch_data[:,:-1]
+                    batch4train[key] = batch_data.reshape(-1, *batch_data.shape[2:])
+                # for key in batch.meta_info.keys():
+                #     if isinstance(batch.meta_info[key], list):
+                #         batch_data = batch.meta_info[key]
+                #         batch_data = np.array(batch_data).reshape(-1, episode_len+1, *np.array(batch_data).shape[1:])
+                #         batch_data = batch_data[:,:-1]
+                #         batch4train[key] = batch_data.reshape(-1, *batch_data.shape[2:]).tolist()
+                batch4train = DataProto.from_dict(batch4train)
+                
                 # update critic
                 if self.use_critic:
                     with marked_timer("update_critic", timing_raw, color="pink"):

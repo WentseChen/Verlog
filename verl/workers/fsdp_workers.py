@@ -21,6 +21,7 @@ import os
 import warnings
 from dataclasses import asdict
 from typing import Any
+import numpy as np
 
 import psutil
 import torch
@@ -74,10 +75,65 @@ from verl.utils.profiler.performance import reduce_timing
 from verl.utils.py_functional import convert_to_regular_types
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
+import copy
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 device_name = get_device_name()
+
+from tensordict import TensorDict
+def expand_to_full_format(short_batch, tokenizer, total_length: int = 2048):
+    """
+    Convert a short batch (with length L < total_length) to a full format
+    with placeholder padding to reach total_length. Uses eos_token_id for
+    input_ids padding and keeps attention_mask zeros for padded positions.
+
+    Args:
+        short_batch (TensorDict): contains attention_mask, input_ids, position_ids
+                                  of shape [bsz, L]
+        tokenizer: tokenizer object with eos_token_id attribute
+        total_length (int): target length to pad to (default: 2048)
+
+    Returns:
+        TensorDict: padded batch with added `prompts` and `responses` fields.
+    """
+    eos_id = tokenizer.eos_token_id
+    bsz, cur_len = short_batch["input_ids"].shape
+    pad_len = total_length - cur_len
+    if pad_len < 0:
+        raise ValueError(f"Current length {cur_len} exceeds target {total_length}")
+
+    # Pad input_ids with eos_id
+    input_ids = torch.cat(
+        [short_batch["input_ids"], torch.full((bsz, pad_len), eos_id, dtype=short_batch["input_ids"].dtype)],
+        dim=1,
+    )
+    # Pad attention_mask and position_ids with zeros
+    attention_mask = torch.cat(
+        [short_batch["attention_mask"], torch.zeros((bsz, pad_len), dtype=short_batch["attention_mask"].dtype)],
+        dim=1,
+    )
+    position_ids = torch.cat(
+        [short_batch["position_ids"], torch.zeros((bsz, pad_len), dtype=short_batch["position_ids"].dtype)],
+        dim=1,
+    )
+
+    # Split into prompts and responses
+    half_len = total_length // 2
+    prompts = input_ids[:, :half_len]
+    responses = input_ids[:, half_len:]
+
+    return TensorDict(
+        {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "prompts": prompts,
+            "responses": responses,
+        },
+        batch_size=torch.Size([bsz]),
+    )
 
 
 def create_device_mesh(world_size, fsdp_size):
@@ -108,6 +164,64 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     or a hybrid engine based on the config.rollout
     """
 
+    def make_env(self, config):
+    
+        def make_vec_env(env_name, task, config, render_mode=None, use_nlp_metrics=False):
+            from verl.envs.environments import make_env
+            from verl.envs.captioners import make_captioner
+            from verl.envs.vec_env import VecEnv
+            def get_env_fn(rank):
+                def init_env():
+                    return make_env(env_name, task, config, render_mode=render_mode)
+                return init_env
+            def get_captioner_fn(rank):
+                def init_captioner():
+                    return make_captioner(config)
+                return init_captioner
+            
+            # change use_nlp_metrics in config to True
+            if use_nlp_metrics:
+                config = deepcopy(config)
+                with open_dict(config):
+                    if "envs" in config and "use_nlp_metrics" in config.envs:
+                        config.envs.use_nlp_metrics = True
+                    else:
+                        warnings.warn("Cannot find envs.use_nlp_metrics in config, please check if you have set it correctly.")
+            
+            env = VecEnv(
+                env_name=env_name,
+                config=config,
+                env_fns=[get_env_fn(i) for i in range(config.envs.n_rollouts)],
+                captioner_fns=[get_captioner_fn(i) for i in range(config.envs.n_rollouts)],
+            )
+            return env
+        
+        def dict_to_namespace(d):
+            """Recursively convert dict to SimpleNamespace for dot-access."""
+            if isinstance(d, dict):
+                return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+            elif isinstance(d, list):
+                return [dict_to_namespace(i) for i in d]
+            else:
+                return d
+            
+        env_config = dict_to_namespace(config)
+        
+        self.env = make_vec_env(
+            env_config.envs.env_name, 
+            env_config.envs.task, 
+            env_config, 
+            render_mode=None
+        )
+        
+        self.val_env = make_vec_env(
+            config.envs.env_name, 
+            config.envs.task, 
+            config, 
+            render_mode=None,
+            # use_nlp_metrics=True,
+        )
+     
     def __init__(self, config: DictConfig, role: str, **kwargs):
         Worker.__init__(self)
 
@@ -719,44 +833,125 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="rollout_generate")
     def generate_sequences(self, prompts: DataProto):
         
-        print("enter fsdp rollout generate")
+        is_eval = "is_eval" in prompts.meta_info 
         
-        # Support all hardwares
-        prompts = prompts.to(get_device_id())
+        if not hasattr(self, '_env_initialized') or not self._env_initialized:
+            self.make_env(self.config)
+            obs, info = self.env.reset()
+            self.last_obs = obs
+            self._env_initialized = True
+            
+        if is_eval:
+            obs, info = self.env.reset()
+            all_dones = np.array([False] * len(obs))
+            all_wins = np.array([0] * len(obs))
+            all_traj_len = np.array([0] * len(obs))
+        else:
+            obs = self.last_obs
+        
+        episode_len = 8 if not is_eval else 1000
+        all_outputs = []
+        metrics = {}
+        
+        for time_step in range(episode_len + 1):
+        
+            max_seq_len = 1024 # TODO
+            self.tokenizer.padding_side = "left"
+            input_obs = self.tokenizer.apply_chat_template(obs, tokenize=False, add_generation_prompt=True) #, enable_thinking=True)
+            input_obs = self.tokenizer(input_obs, return_tensors='pt', padding='max_length', truncation=True, max_length=max_seq_len)
+                    
+            input_ids = input_obs['input_ids']
+            attention_mask = input_obs['attention_mask']
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+        
+            obs_data = {
+                'input_ids': input_ids,
+                'attention_mask': attention_mask,
+                'position_ids': position_ids,
+            }
+            prompts = DataProto.from_dict(tensors=obs_data)
+        
+            # Support all hardwares
+            prompts = prompts.to(get_device_id())
+            
+            assert self._is_rollout
 
-        assert self._is_rollout
+            meta_info = {
+                "eos_token_id": self.generation_config.eos_token_id
+                if self.generation_config is not None
+                else self.tokenizer.eos_token_id,
+                "pad_token_id": self.generation_config.pad_token_id
+                if self.generation_config is not None
+                else self.tokenizer.pad_token_id,
+            }
+            prompts.meta_info.update(meta_info)
+            
+            if time_step == episode_len:
+                prompts = prompts.to("cpu")
+                new_batch = expand_to_full_format(prompts.batch, self.tokenizer)
+                new_batch = DataProto.from_single_dict(new_batch)
+                new_batch.non_tensor_batch["reward"] = [0.0] * len(new_batch)
+                new_batch.non_tensor_batch["done"] = [False] * len(new_batch)
+                all_outputs.append(new_batch)
+                break
+            
+            timing_generate = {}
+            with self.rollout_sharding_manager:
+                log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
+                
+                prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+                with simple_timer("generate_sequences", timing_generate):
+                    output = self.rollout.generate_sequences(prompts=prompts)
+                    
+                log_gpu_memory_usage("After rollout generation", logger=logger)
 
-        meta_info = {
-            "eos_token_id": self.generation_config.eos_token_id
-            if self.generation_config is not None
-            else self.tokenizer.eos_token_id,
-            "pad_token_id": self.generation_config.pad_token_id
-            if self.generation_config is not None
-            else self.tokenizer.pad_token_id,
-        }
-        prompts.meta_info.update(meta_info)
-        timing_generate = {}
-        with self.rollout_sharding_manager:
-            log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
+                output = self.rollout_sharding_manager.postprocess_data(output)
 
-            prompts = self.rollout_sharding_manager.preprocess_data(prompts)
-            with simple_timer("generate_sequences", timing_generate):
-                print("self.rollout:", self.rollout)
-                output = self.rollout.generate_sequences(prompts=prompts)
-
-            log_gpu_memory_usage("After rollout generation", logger=logger)
-
-            output = self.rollout_sharding_manager.postprocess_data(output)
-
-        timing_generate.update(self.rollout_sharding_manager.timing)
-        # We calculate the average timing across all ranks
-        # to make sure meta_info["timing"] is the same
-        timing_generate = reduce_timing(timing_generate)
-        output.meta_info["timing"] = timing_generate
-        output = output.to("cpu")
+            timing_generate.update(self.rollout_sharding_manager.timing)
+            # We calculate the average timing across all ranks
+            # to make sure meta_info["timing"] is the same
+            timing_generate = reduce_timing(timing_generate)
+            output.meta_info["timing"] = timing_generate
+            
+            response_ids = output.batch['responses']
+            actions = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+            output = output.to("cpu")
+            
+            obs, reward, terminated, truncated, info = self.env.step(actions)
+            done = np.logical_or(terminated, truncated)
+            
+            # add reward and done to output as non-tensor meta_info
+            output.non_tensor_batch['reward'] = reward
+            output.non_tensor_batch['done'] = done
+            
+            all_outputs.append(output)
+            
+            for key in info.keys():
+                if key in metrics:
+                    metrics[key].append(info[key])
+                else:
+                    metrics[key] = [info[key]]
+                    
+            if is_eval:
+                is_win = reward > 0
+                all_dones = np.array(all_dones, dtype=bool)
+                all_wins += is_win.astype(int) * (~all_dones).astype(int)
+                all_traj_len += (~all_dones).astype(int)
+                all_dones = np.logical_or(all_dones, done).tolist()
+                if all(all_dones):
+                    break
 
         # clear kv cache
         get_torch_device().empty_cache()
+        output = DataProto.concat(all_outputs)
+        
+        if is_eval:
+            win_rate = sum(all_wins) / len(all_wins)
+            output.meta_info['win_rate'] = win_rate
+            mean_traj_len = sum(all_traj_len) / len(all_traj_len)
+            output.meta_info['traj_len'] = mean_traj_len
+        
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
