@@ -151,9 +151,7 @@ balrog-post-install
 * install Verlog
 ```bash
 # 1. Clone this repository
-# 2. If you need to run with megatron
-bash scripts/install_vllm_sglang_mcore.sh
-# Or if you simply need to run with FSDP
+# 2. install 
 USE_MEGATRON=0 bash scripts/install_vllm_sglang_mcore.sh
 # 3. Install Verlog
 pip install --no-deps -e .
