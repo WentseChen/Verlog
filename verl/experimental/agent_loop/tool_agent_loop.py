@@ -17,8 +17,9 @@ import json
 import logging
 import os
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, List
 from uuid import uuid4
+import numpy as np
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
@@ -112,75 +113,112 @@ class ToolAgentLoop(AgentLoopBase):
             cls.interaction_map: dict[str, BaseInteraction] = cls._initialize_interactions(cls.interaction_config_file)
 
     @rollout_trace_op
-    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
-        messages = list(kwargs["raw_prompt"])
-        image_data = copy.deepcopy(kwargs.get("multi_modal_data", {}).get("image", None))
+    async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], **kwargs) -> List[AgentLoopOutput]:
+
+        messages, info = env.get_last_obs()
         metrics = {}
         request_id = uuid4().hex
-        tools_kwargs = kwargs.get("tools_kwargs", {})
-
-        # Initialize interaction if needed
-        interaction = None
-        interaction_kwargs = {}
-        if self.interaction_config_file:
-            interaction_kwargs = kwargs["extra_info"]["interaction_kwargs"]
-            if "name" not in interaction_kwargs:
-                raise ValueError("'name' key is required in interaction_kwargs")
-            interaction_name = interaction_kwargs["name"]
-            if interaction_name not in self.interaction_map:
-                raise ValueError(
-                    f"Interaction '{interaction_name}' not found in interaction_map. Available interactions: "
-                    f"{list(self.interaction_map.keys())}"
+        
+        prompt_ids = await self.loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.apply_chat_template(
+                messages,
+                tools=self.tool_schemas,
+                add_generation_prompt=True,
+                tokenize=True,
+                **self.apply_chat_template_kwargs,
+            ),
+        )
+        
+        outputs = []
+        num_turns = 0
+        while True:
+            
+            with simple_timer("generate_sequences", metrics):
+                output = await self.server_manager.generate(
+                    request_id=request_id,
+                    prompt_ids=prompt_ids,
+                    sampling_params=sampling_params,
+                    image_data=None,
+                    # env_idx=env_idx,
                 )
-            interaction = self.interaction_map[interaction_name]
-            await interaction.start_interaction(request_id, **interaction_kwargs)
-        # Create AgentData instance to encapsulate all state
-        agent_data = AgentData(
-            messages=messages,
-            image_data=image_data,
-            metrics=metrics,
-            request_id=request_id,
-            tools_kwargs=tools_kwargs,
-            interaction=interaction,
-            interaction_kwargs=interaction_kwargs,
-        )
-
-        # State machine loop
-        state = AgentState.PENDING
-        while state != AgentState.TERMINATED:
-            if state == AgentState.PENDING:
-                state = await self._handle_pending_state(agent_data, sampling_params)
-            elif state == AgentState.GENERATING:
-                state = await self._handle_generating_state(agent_data, sampling_params)
-            elif state == AgentState.PROCESSING_TOOLS:
-                state = await self._handle_processing_tools_state(agent_data)
-            elif state == AgentState.INTERACTING:
-                state = await self._handle_interacting_state(agent_data)
+            
+            # truncate response_ids to response_length
+            response_ids = output.token_ids[: self.response_length]
+            response_mask = [1] * len(response_ids)
+            if output.log_probs:
+                agent_data.response_logprobs = output.log_probs[: self.response_length]
+            
+            
+            actions = await self.loop.run_in_executor(
+                None,
+                lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
+            )
+            
+            metrics.update(info.get("metrics", {}))
+            
+            last_prompt_ids = copy.deepcopy(prompt_ids)
+            is_full = await counter.is_full.remote()
+            if is_full:
+                break
+            
+            messages, reward, terminated, truncated, info = env.step(actions)
+            done = np.logical_or(terminated, truncated)
+            
+            turn_data = AgentLoopOutput(
+                prompt_ids=prompt_ids,
+                response_ids=response_ids,
+                response_mask=response_mask,
+                response_logprobs=response_logprobs if output.log_probs else None,
+                metrics=metrics,
+                rewards=reward,
+                done=done,
+                num_turns=num_turns,
+                env_idx=env_idx,
+            )
+            num_turns += 1
+            
+            # batch_size = await counter.get_batch_size.remote()
+            # mini_batch_size = int(batch_size // 32)
+            # if num_turns == mini_batch_size + 1:
+            #     break
+            
+            prompt_ids = await self.loop.run_in_executor(
+                None,
+                lambda: self.tokenizer.apply_chat_template(
+                    messages,
+                    tools=self.tool_schemas,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    **self.apply_chat_template_kwargs,
+                ),
+            )
+            
+            is_full = await counter.increment.remote()
+            if is_full:
+                break # will discard the last turn data
             else:
-                logger.error(f"Invalid state: {state}")
-                state = AgentState.TERMINATED
-
-        # Finalize output
-        response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
-        prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
-        multi_modal_data = {"image": agent_data.image_data} if agent_data.image_data is not None else {}
-        output = AgentLoopOutput(
-            prompt_ids=prompt_ids,
-            response_ids=response_ids[: self.response_length],
-            response_mask=agent_data.response_mask[: self.response_length],
-            multi_modal_data=multi_modal_data,
-            response_logprobs=agent_data.response_logprobs[: self.response_length]
-            if agent_data.response_logprobs
-            else None,
-            num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
-            metrics=agent_data.metrics,
-            extra_fields={},
+                outputs.append(turn_data)
+            
+        turn_data = AgentLoopOutput(
+            prompt_ids=last_prompt_ids,
+            response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
+            response_mask=[1],
+            metrics=dict(),
+            rewards=0.0,
+            done=True,
+            num_turns=num_turns,
+            env_idx=env_idx,
         )
-        output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
-        return output
+        outputs.append(turn_data)
+        
+        return outputs
 
-    async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
+    async def _handle_pending_state(self, env, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
+        
+        messages, info = env.get_last_obs()
+        
         if self.processor is not None:
             raw_prompt = await self.loop.run_in_executor(
                 None,
@@ -198,7 +236,7 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.prompt_ids = await self.loop.run_in_executor(
                 None,
                 lambda: self.tokenizer.apply_chat_template(
-                    agent_data.messages,
+                    messages,
                     tools=self.tool_schemas,
                     add_generation_prompt=True,
                     tokenize=True,
@@ -356,15 +394,15 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.user_turns += 1
         return AgentState.GENERATING
 
-    async def _handle_interacting_state(self, agent_data: AgentData) -> AgentState:
+    async def _handle_interacting_state(self, env, agent_data: AgentData) -> AgentState:
         """Handle the interacting state: get user input from interaction."""
         (
-            should_terminate_sequence,
+            done,
             interaction_responses,
             reward,
             metrics,
         ) = await agent_data.interaction.generate_response(
-            agent_data.request_id, agent_data.messages, **agent_data.interaction_kwargs
+            env, agent_data.request_id, agent_data.messages, **agent_data.interaction_kwargs
         )
         agent_data.user_turns += 1
 

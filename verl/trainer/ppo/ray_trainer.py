@@ -18,6 +18,7 @@ PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import random
 import json
 import os
 import uuid
@@ -61,6 +62,42 @@ from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seql
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 
+def get_episode_structure(episode_idx: np.ndarray):
+    """
+    Given an array of episode indices, return a list of lists,
+    where each sublist contains the indices belonging to one episode.
+    
+    Example:
+    >>> episode_idx = np.array([0,0,0,1,1,1,1,2,2])
+    >>> get_episode_structure(episode_idx)
+    [[0, 1, 2], [3, 4, 5, 6], [7, 8]]
+    """
+    episodes = []
+    unique_eps = np.unique(episode_idx)
+    for ep in unique_eps:
+        indices = np.where(episode_idx == ep)[0].tolist()
+        episodes.append(indices)
+    return episodes
+
+def remove_last_turn_in_episode(batch: DataProto) -> DataProto:
+    """
+    Remove the last index from each episode group.
+
+    Example:
+    episode_idx = [0,0,0,1,1,1,1,2,2]
+    -> returns batch[0,1,3,4,5,7]
+    """
+    episode_idx = batch.non_tensor_batch["env_idx"]
+    last_indices = []
+    for i in range(len(episode_idx) - 1):
+        if episode_idx[i] != episode_idx[i + 1]:
+            last_indices.append(i)
+    last_indices.append(len(episode_idx) - 1)
+
+    all_indices = list(range(len(episode_idx)))
+    keep_indices = [i for i in all_indices if i not in last_indices]
+    
+    return batch.select_idxs(keep_indices)
 
 @dataclass
 class ResourcePoolManager:
@@ -182,8 +219,10 @@ def compute_response_mask(data: DataProto):
 def compute_advantage(
     data: DataProto,
     adv_estimator: AdvantageEstimator,
-    gamma: float = 1.0,
-    lam: float = 1.0,
+    token_gamma: float = 1.0,
+    step_gamma: float = 1.0,
+    token_lam: float = 1.0,
+    step_lam: float = 1.0,
     num_repeat: int = 1,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
@@ -212,12 +251,18 @@ def compute_advantage(
     # prepare response group
     if adv_estimator == AdvantageEstimator.GAE:
         # Compute advantages and returns using Generalized Advantage Estimation (GAE)
+        episode_idx = data.non_tensor_batch["env_idx"]
+        episode_structure = get_episode_structure(episode_idx)
         advantages, returns = core_algos.compute_gae_advantage_return(
             token_level_rewards=data.batch["token_level_rewards"],
             values=data.batch["values"],
             response_mask=data.batch["response_mask"],
-            gamma=gamma,
-            lam=lam,
+            token_gamma=token_gamma,
+            step_gamma=step_gamma,
+            token_lam=token_lam,
+            step_lam=step_lam,
+            dones=data.batch.get("done", None),
+            episode_structure=episode_structure,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1015,6 +1060,7 @@ class RayPPOTrainer:
         )
         next_step_profile = False
 
+        gen_batch_output = None
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {}
@@ -1032,24 +1078,39 @@ class RayPPOTrainer:
                 batch.non_tensor_batch["uid"] = np.array(
                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                 )
+                
+                num_envs = self.config.envs.num_envs
+                if self.config.trainer.critic_warmup >= self.global_steps:
+                    repeat_time = self.config.trainer.critic_warmup_batch_repeat_times
+                    batch = batch.repeat(repeat_times=repeat_time)
 
                 gen_batch = self._get_gen_batch(batch)
+                batch = DataProto.concat([batch, batch[-num_envs:]])
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
+                gen_batch.meta_info["batch_size"] = len(gen_batch.batch)
+                gen_batch.meta_info["num_envs"] = num_envs
+                
+                assert self.config.actor_rollout_ref.rollout.n == 1, "rollout.n must be 1, in the multi-turn setting, "
                 gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
-                    # generate a batch
-                    with marked_timer("gen", timing_raw, color="red"):
-                        if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                        else:
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+                    
+                    is_first_step = self.global_steps == 1
+                    is_warmup = self.config.trainer.critic_warmup >= self.global_steps
+                    
+                    if not is_warmup or is_first_step:
+                        # generate a batch
+                        with marked_timer("gen", timing_raw, color="red"):
+                            if not self.async_rollout_mode:
+                                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                            else:
+                                gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
 
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
+                            timing_raw.update(gen_batch_output.meta_info["timing"])
+                            gen_batch_output.meta_info.pop("timing", None)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         if self.reward_fn is None:
@@ -1082,6 +1143,7 @@ class RayPPOTrainer:
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
                     # TODO: Decouple the DP balancing and mini-batching.
+                    assert self.config.trainer.balance_batch == False, "Async rollout mode does not support balance_batch yet."
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
 
@@ -1133,11 +1195,18 @@ class RayPPOTrainer:
                             batch = batch.union(values)
 
                     with marked_timer("adv", timing_raw, color="brown"):
-                        # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list]
-                        if self.config.reward_model.launch_reward_fn_async:
-                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
-                        batch.batch["token_level_scores"] = reward_tensor
+                        
+                        # # we combine with rule-based rm
+                        # reward_extra_infos_dict: dict[str, list]
+                        # if self.config.reward_model.launch_reward_fn_async:
+                        #     reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                        # batch.batch["token_level_scores"] = reward_tensor
+                        
+                        seq_len = batch.batch['response_mask'].sum(-1) - 1
+                        indices = torch.arange(batch.batch['response_mask'].shape[0], device=seq_len.device)
+                        batch.batch['token_level_scores'] = torch.zeros_like(batch.batch['response_mask'], dtype=torch.float64)
+                        rewards = batch.batch['rewards'].to(torch.float64)
+                        batch.batch['token_level_scores'][indices, seq_len] = rewards.clone()
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
@@ -1166,26 +1235,36 @@ class RayPPOTrainer:
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,
-                            gamma=self.config.algorithm.gamma,
-                            lam=self.config.algorithm.lam,
+                            token_gamma=self.config.algorithm.token_gamma,
+                            step_gamma=self.config.algorithm.step_gamma,
+                            token_lam=self.config.algorithm.token_lam,
+                            step_lam=self.config.algorithm.step_lam,
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
+                        
+                    batch4train = remove_last_turn_in_episode(batch)
+                    if self.config.trainer.critic_warmup >= self.global_steps:
+                        ratio = self.config.trainer.critic_warmup_batch_divide_ratio
+                        num_indices = max(1, int(len(batch4train) / ratio))
+                        # indices_to_keep = random.sample(indices_to_keep, num_indices)
+                        indices_to_keep = torch.randperm(len(batch4train))[:num_indices]
+                        batch4train = batch4train.select_idxs(indices_to_keep)
 
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
-                            critic_output = self.critic_wg.update_critic(batch)
+                            critic_output = self.critic_wg.update_critic(batch4train)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
 
                     # implement critic warmup
-                    if self.config.trainer.critic_warmup <= self.global_steps:
+                    if self.config.trainer.critic_warmup < self.global_steps:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
+                            actor_output = self.actor_rollout_wg.update_actor(batch4train)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 

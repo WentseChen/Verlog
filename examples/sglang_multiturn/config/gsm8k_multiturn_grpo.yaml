@@ -18,4 +18,5 @@ actor_rollout_ref:
     name: sglang
     multi_turn:
       enable: True
-      max_assistant_turns: 5
+      max_assistant_turns: 100000
+      max_user_turns: 100000
