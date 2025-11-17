@@ -21,6 +21,7 @@ import numpy as np
 import ray
 from omegaconf import DictConfig
 
+from pydantic import BaseModel
 from recipe.fully_async_policy.vllm_rollout.vllm_async_server import FullyAsyncvLLMReplica
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopManager,
@@ -35,6 +36,10 @@ from verl.protocol import DataProto
 from verl.single_controller.ray import RayWorkerGroup
 from verl.utils.rollout_trace import rollout_trace_attr
 from verl.workers.rollout.replica import TokenOutput
+
+from verl.envs.env import Env
+from verl.envs.environments import make_env
+from verl.envs.captioners import make_captioner
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -52,8 +57,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         )
         return output
 
-
-class FullyAsyncAgentLoopOutput(AgentLoopOutput):
+class FullyAsyncAgentLoopOutputData(AgentLoopOutput):
     """Agent loop output."""
 
     is_cancel: bool = False
@@ -64,7 +68,17 @@ class FullyAsyncAgentLoopOutput(AgentLoopOutput):
     """Indicate start parameter version when this response is generated"""
     param_version_end: int = 0
     """Indicate end parameter version when this response is generated, used for partial rollout"""
+    rewards: float = 0.0
+    """Cumulative rewards, for RL agent loop."""
 
+
+class FullyAsyncAgentLoopOutput(BaseModel):
+    """Fully async agent loop output."""
+    
+    data: list[FullyAsyncAgentLoopOutputData]
+    is_cancel: bool = False
+    param_version_start: int = 0
+    param_version_end: int = 0
 
 @ray.remote
 class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
@@ -75,13 +89,13 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
         super().__init__(config, server_handles, reward_router_address)
 
     async def generate_sequences_no_post(
-        self, batch: DataProto, partial_output_list: Optional[list[AgentLoopOutput]]
-    ) -> list[AgentLoopOutput]:
+        self, batch: DataProto, partial_output_list: Optional[list[FullyAsyncAgentLoopOutput]]
+    ) -> list[FullyAsyncAgentLoopOutput]:
         """Generate sequences from agent loop.
 
         Args:
             batch (DataProto): Input batch.
-            partial_output_list: Optional[List[AgentLoopOutput]]: already rollout result.
+            partial_output_list: Optional[list[FullyAsyncAgentLoopOutput]]: already rollout result.
 
         Returns:
             list[FullyAsyncAgentLoopOutput]: List of agent loop outputs, one per sample in the batch.
@@ -122,6 +136,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
             tasks.append(
                 asyncio.create_task(self._partial_run_agent_loop(sampling_params, trajectory_info[i], **kwargs))
             )
+            break
         return await asyncio.gather(*tasks)
 
     async def _partial_run_agent_loop(
@@ -131,7 +146,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
         *,
         agent_name: str,
         **kwargs,
-    ) -> AgentLoopOutput:
+    ) -> FullyAsyncAgentLoopOutput:
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
@@ -151,6 +166,10 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
                 tokenizer=self.tokenizer,
                 processor=self.processor,
             )
+            
+            # add env to kwargs
+            kwargs["env"] = self.env
+            
             return await agent_loop.run(sampling_params, **kwargs)
 
 
@@ -217,21 +236,25 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
     async def generate_single_sample_async(
         self,
         sample: DataProto,
-        partial_output_list: Optional[list[AgentLoopOutput]],
-    ) -> list[AgentLoopOutput]:
+        partial_output_list: Optional[list[FullyAsyncAgentLoopOutput]],
+    ) -> list[FullyAsyncAgentLoopOutput]:
         """
         Asynchronously process a single sample
 
         Args:
             sample: Single sample data
-            partial_output_list: Optional[List[AgentLoopOutput]]: already rollout result.
+            partial_output_list: Optional[list[FullyAsyncAgentLoopOutput]]: already rollout result.
 
         Returns:
-            list[AgentLoopOutput]: Processing results
+            list[FullyAsyncAgentLoopOutput]: Processing results
         """
         worker = self._select_best_worker()
         output_future = worker.generate_sequences_no_post.remote(sample, partial_output_list)
-        return await asyncio.wrap_future(output_future.future())
+        results = await asyncio.wrap_future(output_future.future())
+        all_data = []
+        for r in results:
+            all_data.extend(r.data)
+        return all_data
 
     def _select_best_worker(self):
         """Select the best worker, simple round-robin load balancing"""

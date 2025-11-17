@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name='zero'
+project_name='debug'
 exp_name='debug'
+
+module load cuda/12.4
 
 # Ray
 # RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
@@ -25,20 +27,19 @@ fi
 
 # Algorithm parameters
 adv_estimator=grpo
-
-use_kl_in_reward=False
-kl_coef=0.0
+use_kl_in_reward=True
+kl_coef=0.001
 use_kl_loss=False
 kl_loss_coef=0.0
 
 clip_ratio_low=0.2
-clip_ratio_high=0.28
+clip_ratio_high=0.2
 
 # Response length parameters
-max_prompt_length=$((1024 * 2))
-max_response_length=$((1024 * 8))
+max_prompt_length=1024
+max_response_length=512
 enable_overlong_buffer=True
-overlong_buffer_len=$((1024 * 4))
+overlong_buffer_len=512
 overlong_penalty_factor=1.0
 
 # Training parameters
@@ -58,24 +59,24 @@ ref_offload=True
 actor_offload=False
 gen_tp=1
 sp_size=1
-fsdp_size=2
+fsdp_size=3
 
 # Fully async specific parameters
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-4}
 
-n_gpus_rollout=2
+n_gpus_rollout=1
 n_gpus_training=$((NGPUS_PER_NODE - n_gpus_rollout))
 
 train_prompt_bsz=0
 gen_prompt_bsz=1
-n_resp_per_prompt=8
-train_prompt_mini_bsz=16
-total_rollout_steps=$(((512*100)))
+n_resp_per_prompt=1
+train_prompt_mini_bsz=129
+total_rollout_steps=$(((256*300)))
 test_freq=10
-staleness_threshold=0.1
-trigger_parameter_sync_step=4
-require_batches=4
+staleness_threshold=1.0
+trigger_parameter_sync_step=2
+require_batches=2
 partial_rollout=True
 
 python -m recipe.fully_async_policy.fully_async_main \
@@ -110,8 +111,6 @@ python -m recipe.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
-    actor_rollout_ref.actor.optim.weight_decay=0.1 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${actor_offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${actor_offload} \
@@ -119,7 +118,7 @@ python -m recipe.fully_async_policy.fully_async_main \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.80 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.50 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
@@ -143,7 +142,8 @@ python -m recipe.fully_async_policy.fully_async_main \
     +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
     +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
     +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
-    trainer.logger=['console','tensorboard'] \
+    trainer.balance_batch=False \
+    trainer.logger=['console','wandb'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.val_before_train=False \

@@ -308,10 +308,51 @@ def assemble_batch_from_rollout_samples(
     rollout_status = rollout_samples[0].rollout_status
     # Add a prefix to all rollout_status keys
     rollout_status = {f"fully_async/{key}": value for key, value in rollout_status.items()}
+    
+    for rollout_idx in range(len(rollout_samples)):
+        for batch_key in rollout_samples[rollout_idx].full_batch.non_tensor_batch.keys():
+            original_array = rollout_samples[rollout_idx].full_batch.non_tensor_batch[batch_key]
+            np_length = len(original_array)
+            batch_len = rollout_samples[rollout_idx].full_batch.batch.batch_size[0]
+            if np_length < batch_len:
+                pad_length = batch_len - np_length
+                pad_value = original_array[-1]
+            
+                if isinstance(original_array, list):
+                    pad_array = [pad_value] * pad_length
+                    rollout_samples[rollout_idx].full_batch.non_tensor_batch[batch_key] = original_array + pad_array
+                else:
+                    if isinstance(pad_value, str) or original_array.dtype == object:
+                        pad_shape = (pad_length,) + original_array.shape[1:]
+                        pad_array = np.full(pad_shape, pad_value, dtype=object)
+                    else:
+                        pad_array = np.repeat(
+                            pad_value[np.newaxis, ...], 
+                            pad_length, 
+                            axis=0
+                        )
+                    rollout_samples[rollout_idx].full_batch.non_tensor_batch[batch_key] = np.concatenate(
+                        [original_array, pad_array], axis=0
+                    )
+                    
+            elif np_length > batch_len:
+                if isinstance(original_array, list):
+                    rollout_samples[rollout_idx].full_batch.non_tensor_batch[batch_key] = original_array[:batch_len]
+                else:
+                    rollout_samples[rollout_idx].full_batch.non_tensor_batch[batch_key] = original_array[:batch_len]
 
     for rs in rollout_samples:
         rollout_samples_batch.append(rs.full_batch)
         processing_times.extend(rs.processing_times)
+        
+    # assert all samples have the same batch
+    for rs in rollout_samples_batch:
+        for key in rs.batch.keys():
+            assert rs.batch[key].shape[1:] == rollout_samples_batch[0].batch[key].shape[1:], (
+                f"mismatch in batch size for key {key}: "
+                f"{rs.batch[key].shape[1:]} vs {rollout_samples_batch[0].batch[key].shape[1:]}"
+            )
+    
     final_batch = DataProto.concat(rollout_samples_batch)
 
     # Calculate response_mask (if not present)
@@ -339,6 +380,7 @@ def assemble_batch_from_rollout_samples(
     }
     processing_time_stats = {f"fully_async/{key}": value for key, value in processing_time_stats.items()}
 
+    rs = rollout_samples[0]
     param_version_diff = [abs(a - b) for a, b in zip(rs.param_version_end, rs.param_version_start, strict=False)]
     num_diff0 = param_version_diff.count(0)
     partial_stats = {

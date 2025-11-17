@@ -15,8 +15,9 @@ import logging
 import os
 from typing import Any, Optional
 from uuid import uuid4
+import numpy as np
 
-from recipe.fully_async_policy.agent_loop.agent_loop import AgentLoopOutput, FullyAsyncAgentLoopOutput
+from recipe.fully_async_policy.agent_loop.agent_loop import AgentLoopOutput, FullyAsyncAgentLoopOutput, FullyAsyncAgentLoopOutputData
 from verl.experimental.agent_loop import AgentLoopBase
 from verl.experimental.agent_loop.agent_loop import register
 from verl.utils.profiler import simple_timer
@@ -35,8 +36,17 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
         self.response_length = self.config.actor_rollout_ref.rollout.response_length
         self.apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
 
-    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+    async def run(self, sampling_params: dict[str, Any], **kwargs) -> FullyAsyncAgentLoopOutput:
         output: Optional[FullyAsyncAgentLoopOutput] = kwargs.get("output", None)
+        env = kwargs.get("env", None)
+        
+        if output is not None:
+            if output.data[-1].is_cancel:
+                final_output = output.data[:-1]
+        else:
+            messages, info = env.reset()
+            final_output = []
+        
         messages = list(kwargs["raw_prompt"])
         param_version = kwargs.get("param_version", 0)
 
@@ -46,67 +56,106 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
 
         param_version_start = param_version
         param_version_end = param_version
+        num_turns = 0
 
-        if not output:
-            # TODO(baiyan): it is supposed to use the correct processor,
-            #    but I found the async training would hang if use_correct_processor=True.
-            #    so we use the tokenizer to tokenize the prompt for now.
-            use_correct_processor = False
-            if self.processor is not None and use_correct_processor:
+        while True:
 
-                def get_prompt_ids():
-                    raw_prompt = self.processor.apply_chat_template(
-                        messages,
-                        add_generation_prompt=True,
-                        tokenize=False,
-                        **self.apply_chat_template_kwargs,
+            if not output:
+                # TODO(baiyan): it is supposed to use the correct processor,
+                #    but I found the async training would hang if use_correct_processor=True.
+                #    so we use the tokenizer to tokenize the prompt for now.
+                use_correct_processor = False
+                if self.processor is not None and use_correct_processor:
+
+                    def get_prompt_ids():
+                        raw_prompt = self.processor.apply_chat_template(
+                            messages,
+                            add_generation_prompt=True,
+                            tokenize=False,
+                            **self.apply_chat_template_kwargs,
+                        )
+                        model_inputs = self.processor(text=[raw_prompt], images=image_data, return_tensors="pt")
+                        return model_inputs.pop("input_ids").squeeze(0).tolist()
+
+                    prompt_ids = await self.loop.run_in_executor(None, get_prompt_ids)
+                else:
+                    prompt_ids = await self.loop.run_in_executor(
+                        None,
+                        lambda: self.tokenizer.apply_chat_template(
+                            messages, add_generation_prompt=True, tokenize=True, **self.apply_chat_template_kwargs
+                        ),
                     )
-                    model_inputs = self.processor(text=[raw_prompt], images=image_data, return_tensors="pt")
-                    return model_inputs.pop("input_ids").squeeze(0).tolist()
-
-                prompt_ids = await self.loop.run_in_executor(None, get_prompt_ids)
             else:
-                prompt_ids = await self.loop.run_in_executor(
-                    None,
-                    lambda: self.tokenizer.apply_chat_template(
-                        messages, add_generation_prompt=True, tokenize=True, **self.apply_chat_template_kwargs
-                    ),
+                if output.data[-1].is_cancel:
+                    # Resume the paused sample,
+                    # add the result directly after prompt_ids,
+                    # and reset generate_sequences metric
+                    prompt_ids = output.data[-1].prompt_ids + output.data[-1].response_ids
+                    metrics["generate_sequences"] = output.data[-1].metrics.generate_sequences
+                    param_version_start = output.data[-1].param_version_start
+                else:
+                    # In the same batch of samples,
+                    # ome are canceled and some are not.
+                    # The samples without partial rollout are returned directly.
+                    return output
+            with simple_timer("generate_sequences", metrics):
+                response_ids, log_probs, is_cancel = await self.server_manager.generate_for_partial(
+                    request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, image_data=image_data
                 )
-        else:
-            if output.is_cancel:
-                # Resume the paused sample,
-                # add the result directly after prompt_ids,
-                # and reset generate_sequences metric
-                prompt_ids = output.prompt_ids + output.response_ids
-                metrics["generate_sequences"] = output.metrics.generate_sequences
-                param_version_start = output.param_version_start
+            if output:
+                # Pause the sample to be resumed, add the output result to response_ids, and reset response_mask
+                prompt_ids = output.prompt_ids
+                log_probs = output.log_probs + log_probs
+                response_ids = output.response_ids + response_ids
+            
+            response_ids = response_ids[: self.response_length]
+            response_mask = [1] * len(response_ids)
+                
+            # env step 
+            if not is_cancel:
+                actions = await self.loop.run_in_executor(
+                    None,
+                    lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
+                )
+                messages, reward, terminated, truncated, info = env.step(actions)
+                done = np.logical_or(terminated, truncated)
             else:
-                # In the same batch of samples,
-                # ome are canceled and some are not.
-                # The samples without partial rollout are returned directly.
-                return output
-        with simple_timer("generate_sequences", metrics):
-            response_ids, log_probs, is_cancel = await self.server_manager.generate_for_partial(
-                request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, image_data=image_data
+                reward = 0.0
+                done = True
+            
+            # create training sample output
+            output = FullyAsyncAgentLoopOutputData(
+                prompt_ids=prompt_ids,
+                response_ids=response_ids,
+                response_mask=response_mask,
+                num_turns=num_turns,
+                metrics=metrics,
+                is_cancel=is_cancel,
+                log_probs=log_probs,
+                param_version_start=param_version_start,
+                param_version_end=param_version_end,
+                reward=reward,
+                # multi_modal_data={"image": image_data} if image_data is not None else {},
             )
-        if not output:
-            response_mask = [1] * len(response_ids)
-        else:
-            # Pause the sample to be resumed, add the output result to response_ids, and reset response_mask
-            prompt_ids = output.prompt_ids
-            log_probs = output.log_probs + log_probs
-            response_ids = output.response_ids + response_ids
-            response_mask = [1] * len(response_ids)
-
-        return FullyAsyncAgentLoopOutput(
-            prompt_ids=prompt_ids,
-            response_ids=response_ids[: self.response_length],
-            response_mask=response_mask[: self.response_length],
-            num_turns=2,
-            metrics=metrics,
-            is_cancel=is_cancel,
-            log_probs=log_probs,
-            param_version_start=param_version_start,
-            param_version_end=param_version_end,
-            # multi_modal_data={"image": image_data} if image_data is not None else {},
+            final_output.append(output)
+            output = None
+            
+            num_turns += 1
+            
+            # if done:
+            #     for out in final_output:
+            #         out.reward = reward
+            
+            if is_cancel or done:
+                break
+        
+        result = FullyAsyncAgentLoopOutput(
+            data=final_output, 
+            is_cancel=final_output[-1].is_cancel,
+            param_version_start=final_output[-1].param_version_start,
+            param_version_end=final_output[-1].param_version_end,
         )
+        
+        print("num_turns:", num_turns, "len(final_output):", len(final_output))
+        
+        return result

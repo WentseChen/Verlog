@@ -56,3 +56,62 @@ actor_rollout_ref:
   actor:
     # Whether to use rollout log probs for training
     use_rollout_log_probs: ${oc.select:async_training.use_rollout_log_probs, True}
+
+
+envs:
+
+  # number of parallel environments
+  num_envs: 32
+
+  # name of the environment, e.g., "babyai", "crafter", "babaisai", etc.
+  env_name: babyai
+
+  # scenario name for the environment
+  task: BabyAI-MixedTrainLocal-v0/goto
+
+  # penalty for agent taking invalid actions
+  format_penalty: 0.1
+
+  # If Ture, all rewards (except format penalty) are either 0 or 1
+  binary_reward: True
+
+  captioner:
+
+    # type of captioner, e.g., "cot", "naive", etc.
+    type: cot
+
+    # maximum number of turns of actions and observations to keep in history
+    max_text_history: 1
+
+    # maximum number of turns of chain-of-thought reasoning path to keep in history
+    max_cot_history: 1
+
+    # maximum number of images to keep in history
+    max_image_history: 0
+
+  babyai_kwargs:
+
+    num_dists: 0
+
+  babaisai_kwargs: 
+
+    add_ruleset: True
+
+  crafter_kwargs:
+    area: [64, 64]              
+    view: [9, 9]            
+    size: [256, 256] # Image size in Crafter
+    reward: True                       
+    seed: null                  
+    max_episode_steps: 2000 
+     
+  minihack_kwargs: 
+    character: "@"
+    max_episode_steps: 100
+    penalty_step: -0.01         
+    penalty_time: 0.0           
+    penalty_mode: constant      
+    savedir: null
+    save_ttyrec_every: 0
+    autopickup: False           
+    skip_more: True
