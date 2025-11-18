@@ -38,14 +38,22 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> FullyAsyncAgentLoopOutput:
         output: Optional[FullyAsyncAgentLoopOutput] = kwargs.get("output", None)
-        env = kwargs.get("env", None)
+        
+        env_actor = kwargs.get("env_actor", None)
+        env_idx = kwargs.get("env_idx", None)
+        
+        if env_actor is None:
+            raise ValueError("env_actor must be provided in kwargs")
         
         if output is not None:
             if output.data[-1].is_cancel:
                 final_output = output.data[:-1]
         else:
-            messages, info = env.reset()
+            messages, info = await env_actor.reset.remote()
             final_output = []
+            
+        if output is not None:
+            import pdb; pdb.set_trace()
         
         messages = list(kwargs["raw_prompt"])
         param_version = kwargs.get("param_version", 0)
@@ -117,7 +125,7 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
                     None,
                     lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
                 )
-                messages, reward, terminated, truncated, info = env.step(actions)
+                messages, reward, terminated, truncated, info = await env_actor.step.remote(actions)
                 done = np.logical_or(terminated, truncated)
             else:
                 reward = 0.0
@@ -154,8 +162,9 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
             is_cancel=final_output[-1].is_cancel,
             param_version_start=final_output[-1].param_version_start,
             param_version_end=final_output[-1].param_version_end,
+            env_idx=env_idx,
         )
         
-        print("num_turns:", num_turns, "len(final_output):", len(final_output))
+        print("env_idx", env_idx, "num_turns:", num_turns, "len(final_output):", len(final_output))
         
         return result

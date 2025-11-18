@@ -17,6 +17,7 @@ from pprint import pformat
 
 import ray
 from ray import ObjectRef
+from copy import deepcopy
 
 from recipe.fully_async_policy.detach_utils import (
     RolloutSample,
@@ -32,7 +33,33 @@ from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.profiler import marked_timer
 from verl.utils.tracking import ValidationGenerationsLogger
 
+from verl.envs.env import Env
+from verl.envs.environments import make_env
+from verl.envs.captioners import make_captioner
 
+from typing import Any, Optional
+
+@ray.remote
+class EnvActor:
+    """Ray Actor wrapper for Env to maintain state across calls"""
+    
+    def __init__(self, env_name: str, env_task: str, config: Any):
+        base_env = make_env(env_name, env_task, config)
+        captioner = make_captioner(config)
+        self.env = Env(env_name, config, base_env, captioner)
+        self.env_idx = None
+        
+    def set_env_idx(self, env_idx: int):
+        self.env_idx = env_idx
+    
+    def reset(self):
+        messages, info = self.env.reset()
+        return messages, info
+    
+    def step(self, action: Any):
+        messages, reward, terminated, truncated, info = self.env.step(action)
+        return messages, reward, terminated, truncated, info
+    
 @ray.remote(num_cpus=10, max_concurrency=100)
 class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
     """
@@ -149,6 +176,45 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.active_tasks = set()
         self.result_queue = asyncio.Queue()
         self.cancel_queue = asyncio.Queue()
+        
+        # Multi-turn envs pool
+        self.max_envs = config.envs.get("max_envs", 64)
+        self.env_actor_pool = {}  # {env_idx: EnvActor handle}
+        self.env_counter = 0
+        self.env_lock = asyncio.Lock()
+        
+        self.env_name = config.envs.env_name
+        self.env_task = config.envs.task
+        self.env_config = config
+
+    async def _get_or_create_env_actor(self, env_idx: Optional[int] = None):
+        async with self.env_lock:
+            if env_idx is not None and env_idx in self.env_actor_pool:
+                # print(f"[FullyAsyncRollouter][Env] Reusing env_actor {env_idx}")
+                return env_idx, self.env_actor_pool[env_idx]
+            
+            env_actor = EnvActor.remote(
+                env_name=self.env_name,
+                env_task=self.env_task,
+                config=self.env_config
+            )
+            
+            new_env_idx = self.env_counter
+            self.env_counter += 1
+            self.env_actor_pool[new_env_idx] = env_actor
+            
+            await env_actor.set_env_idx.remote(new_env_idx)
+            
+            # print(f"[FullyAsyncRollouter][Env] Created new env_actor {new_env_idx}, pool size: {len(self.env_actor_pool)}")
+            return new_env_idx, env_actor
+
+    async def _release_env_actor(self, env_idx: int):
+        async with self.env_lock:
+            if env_idx in self.env_actor_pool:
+                ray.kill(self.env_actor_pool[env_idx])
+                del self.env_actor_pool[env_idx]
+                # print(f"[FullyAsyncRollouter][Env] Released env_actor {env_idx}, pool size: {len(self.env_actor_pool)}")
+
 
     async def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
@@ -311,6 +377,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 param_version_end=[],
                 processing_times=[],
                 rollout_status={},
+                env_idx=0,  
             )
 
             await self.pending_queue.put(rollout_sample)
@@ -334,6 +401,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         """
         Streaming worker coroutines, a sample is submitted for processing without waiting for batches
         """
+        env_idx = 0
         while True:
             if self.paused or await self._should_pause_generation():
                 print(
@@ -363,6 +431,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 simple_from_cancel_queue = True
             else:
                 rollout_sample = await self.pending_queue.get()
+                rollout_sample.env_idx = env_idx
+                env_idx = (env_idx + 1) % self.max_envs
                 self.staleness_samples += 1
 
             if rollout_sample == "DONE":
@@ -408,14 +478,21 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
 
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
         """Process a single sample streamingly"""
+        
+        env_idx = rollout_sample.env_idx # Verlog TODO
+        env_idx, env_actor = await self._get_or_create_env_actor(env_idx)
+        
         # Calling asynchronous generation methods
         rollout_sample.full_batch.non_tensor_batch["param_version"] = [self.current_param_version] * len(
             rollout_sample.full_batch
         )
+        
+        rollout_sample.full_batch.meta_info["env_actor"] = env_actor
+        rollout_sample.full_batch.meta_info["env_idx"] = env_idx
+        
         agent_loop_output_list = await self.async_rollout_manager.generate_single_sample_async(
             rollout_sample.full_batch, rollout_sample.agent_loop_output_list
         )
-        rollout_sample.agent_loop_output_list = agent_loop_output_list
 
         is_cancel = False
         for agent_loop in agent_loop_output_list:
@@ -425,13 +502,15 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         if is_cancel:
             # Put in the cancel queue and wait for the generation to resume
             await self.cancel_queue.put(rollout_sample)
+            self.processed_sample_count += 1
         else:
-            # put into the result_queue
-            rollout_sample.param_version = self.current_param_version
-            rollout_sample.rollout_status = await self.get_statistics()
-            await self.result_queue.put(rollout_sample)
-
-        self.processed_sample_count += 1
+            for agent_loop in agent_loop_output_list:
+                copy_rs = deepcopy(rollout_sample)
+                copy_rs.agent_loop_output_list = [agent_loop]
+                copy_rs.param_version = self.current_param_version
+                copy_rs.rollout_status = await self.get_statistics()
+                await self.result_queue.put(copy_rs)
+                self.processed_sample_count += 1
 
     async def _consumer_worker(self):
         """
@@ -630,6 +709,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             "monitor/queue/cancel_queue_size": self.cancel_queue.qsize(),
             "monitor/queue/result_queue_size": self.result_queue.qsize(),
             "monitor/queue/mq_queue_size": queue_stats["queue_size"],
+            "monitor/env_actor_pool_size": len(self.env_actor_pool),
             # counting stats
             "count/current_param_version": self.current_param_version,
             "count/total_generated_samples": self.total_generated_samples,
@@ -641,6 +721,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             "static/staleness_threshold": self.staleness_threshold,
             "static/max_queue_size": self.max_queue_size,
             "static/max_concurrent_samples": self.max_concurrent_samples,
+            "static/max_envs": self.max_envs,
         }
 
         return stats

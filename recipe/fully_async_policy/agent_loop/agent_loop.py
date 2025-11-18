@@ -79,6 +79,7 @@ class FullyAsyncAgentLoopOutput(BaseModel):
     is_cancel: bool = False
     param_version_start: int = 0
     param_version_end: int = 0
+    env_idx: int = None
 
 @ray.remote
 class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
@@ -133,6 +134,10 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             kwargs["output"] = partial_output_list[i]
+            
+            kwargs["env_actor"] = batch.meta_info.get("env_actor")
+            kwargs["env_idx"] = batch.meta_info.get("env_idx")
+            
             tasks.append(
                 asyncio.create_task(self._partial_run_agent_loop(sampling_params, trajectory_info[i], **kwargs))
             )
@@ -166,9 +171,6 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
                 tokenizer=self.tokenizer,
                 processor=self.processor,
             )
-            
-            # add env to kwargs
-            kwargs["env"] = self.env
             
             return await agent_loop.run(sampling_params, **kwargs)
 

@@ -175,6 +175,8 @@ class RolloutSample:
     param_version_start: list[int]
     param_version_end: list[int]
     rollout_status: dict[str, Any]
+    
+    env_idx: int = None  
 
 
 @dataclass
@@ -340,6 +342,12 @@ def assemble_batch_from_rollout_samples(
                     rollout_samples[rollout_idx].full_batch.non_tensor_batch[batch_key] = original_array[:batch_len]
                 else:
                     rollout_samples[rollout_idx].full_batch.non_tensor_batch[batch_key] = original_array[:batch_len]
+
+    for rollout_idx in range(len(rollout_samples)):
+        if "env_actor" in rollout_samples[rollout_idx].full_batch.meta_info:
+            rollout_samples[rollout_idx].full_batch.meta_info.pop("env_actor")
+        if "env_idx" in rollout_samples[rollout_idx].full_batch.meta_info:
+            rollout_samples[rollout_idx].full_batch.meta_info.pop("env_idx")
 
     for rs in rollout_samples:
         rollout_samples_batch.append(rs.full_batch)
