@@ -133,7 +133,7 @@ val_kwargs:
   top_p: 1.0
 
   # Sampling temperature for rollout.
-  temperature: 0
+  temperature: 1.0
 
   # whether to repeat n times for validation
   n: 1

@@ -140,8 +140,6 @@ algorithm:
 # config for the trainer
 trainer:
 
-  mask_noun_tokens: False
-
   show_ref_obs_prob: True
 
   # Whether to balance batch sizes across distributed workers
