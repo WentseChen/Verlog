@@ -1002,9 +1002,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["temperature"] = self.config.rollout.temperature
         data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+        return_all_logits = data.meta_info.get("return_all_logits", False)
         with self.ulysses_sharding_manager:
             data = data.to("cpu")  # data will to device with each micro batch on ref.compute_log_prob
-            output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+            output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False, return_all_logits=return_all_logits)
             output = DataProto.from_dict(tensors={"ref_log_prob": output})
 
         output = output.to("cpu")

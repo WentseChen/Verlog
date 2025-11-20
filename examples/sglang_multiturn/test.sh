@@ -1,19 +1,9 @@
-#!/bin/bash
-#SBATCH --job-name=test
-#SBATCH --output=logs/slurm-%j.out
-#SBATCH --error=logs/slurm-%j.err
-#SBATCH --mem=0
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=8
-#SBATCH --partition=gpuA40x4
-#SBATCH --account=bfoz-delta-gpu
-#SBATCH --time=47:59:59
-#SBATCH --gpus-per-node=4
+# run on 4xA40
+# make sure your current working directory is the root of the project
 
-source /projects/bfoz/wchen11/anaconda3/bin/activate 
-conda activate verlog
-cd /u/wchen11/Verlog
+set -x
+export HYDRA_FULL_ERROR=1
+ulimit -n 65535
 
 NUM_GPUS_PER_NODE=4
 unset ROCR_VISIBLE_DEVICES
@@ -23,12 +13,11 @@ PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
 
 NUM_ENVS=32
-BATCH_SIZE=256
+BATCH_SIZE=64
 MINI_BATCH_SIZE=$((BATCH_SIZE / 2))
 MICRO_BATCH_SIZE=8 
 FORWARD_BATCH_SIZE=$((4 * MICRO_BATCH_SIZE))
 OFFLOAD=false
-PPO_EPOCHS=1
 
 VLLM_USE_V1=1
 
@@ -37,7 +26,7 @@ python3 -m verl.trainer.main_ppo \
     --config-name='gsm8k_multiturn_grpo' \
     algorithm.adv_estimator=gae \
     data.train_batch_size=${BATCH_SIZE} \
-    data.max_prompt_length=1024 \
+    data.max_prompt_length=2048 \
     data.max_response_length=512 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
@@ -49,7 +38,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_mini_batch_size=${MINI_BATCH_SIZE} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
     actor_rollout_ref.actor.use_kl_loss=False \
-    actor_rollout_ref.actor.ppo_epochs=${PPO_EPOCHS} \
     actor_rollout_ref.actor.entropy_coeff=0.001 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=${OFFLOAD} \
@@ -57,30 +45,30 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.agent.num_workers=${NUM_ENVS} \
     actor_rollout_ref.rollout.n=1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=True \
     trainer.balance_batch=False \
-    trainer.critic_warmup=10 \
-    trainer.critic_warmup_batch_repeat_times=40 \
-    trainer.critic_warmup_batch_divide_ratio=4 \
+    trainer.critic_warmup=0 \
+    trainer.critic_warmup_batch_repeat_times=1 \
+    trainer.critic_warmup_batch_divide_ratio=1 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='zero' \
     trainer.experiment_name='debug' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
-    trainer.test_freq=30 \
+    trainer.test_freq=-1 \
     trainer.total_epochs=60 \
-    trainer.show_ref_obs_prob=False \
-    trainer.mask_noun_tokens=False \
     trainer.val_before_train=True \
+    trainer.show_ref_obs_prob=True \
+    trainer.mask_noun_tokens=False \
     envs.num_envs=${NUM_ENVS} \
-    envs.env_name=babyai \
-    envs.task=BabyAI-MixedTrainLocal-v0/open \
+    envs.env_name=babaisai \
+    envs.task=env/two_room-goto_win \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \
@@ -88,7 +76,6 @@ python3 -m verl.trainer.main_ppo \
     critic.model.use_remove_padding=True \
     critic.model.path=Qwen/Qwen2.5-3B-Instruct \
     critic.model.enable_gradient_checkpointing=True \
-    critic.ppo_epochs=${PPO_EPOCHS} \
     critic.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
     critic.ppo_mini_batch_size=${MINI_BATCH_SIZE} \
     critic.model.fsdp_config.param_offload=${OFFLOAD} \

@@ -62,6 +62,64 @@ from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seql
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 
+def find_query_in_batch(query, batch_prompts):
+    """
+    Find the query sequence in batch_prompts tensor and return the last matched index
+    for each sequence in the batch.
+    
+    Args:
+        query: List of token ids to search for
+        batch_prompts: Tensor of shape (batch_size, seq_len)
+    
+    Returns:
+        last_match_indices: Tensor of shape (batch_size,) containing the last matched
+                           index for each sequence, or -1 if not found
+    """
+    # Convert query to tensor
+    query_tensor = torch.tensor(query, dtype=batch_prompts.dtype, device=batch_prompts.device)
+    query_len = len(query)
+    
+    batch_size, seq_len = batch_prompts.shape
+    
+    # Initialize result tensor with -1 (not found)
+    last_match_indices = torch.full((batch_size,), -1, dtype=torch.long, device=batch_prompts.device)
+    
+    # For each possible starting position
+    for start_idx in range(seq_len - query_len + 1):
+        # Extract windows of size query_len from batch
+        windows = batch_prompts[:, start_idx:start_idx + query_len]
+        
+        # Check if window matches query for each batch item
+        matches = (windows == query_tensor).all(dim=1)
+        
+        # Update last_match_indices where matches are found
+        # We add query_len - 1 to get the index of the last token in the match
+        last_match_indices = torch.where(
+            matches,
+            torch.tensor(start_idx - 1, device=batch_prompts.device),
+            last_match_indices
+        )
+    
+    return last_match_indices
+
+def find_second_last_in_batch(data: torch.Tensor, index: int):
+
+    output = torch.full((data.shape[0],), -1, dtype=torch.long, device=data.device)    
+    for i in range(data.shape[0]):
+        # Find all positions where value equals 25512
+        positions = torch.where(data[i] == index)[0]
+        
+        if len(positions) >= 2:
+            # Get the second-to-last position (index -2)
+            output[i] = positions[-2]
+        elif len(positions) == 1:
+            # Only one occurrence, return that position
+            output[i] = positions[0]
+        else:
+            # No occurrence found, you can set to -1 or 0
+            output[i] = -1
+    return output
+
 def get_episode_structure(episode_idx: np.ndarray):
     """
     Given an array of episode indices, return a list of lists,
@@ -610,6 +668,8 @@ class RayPPOTrainer:
                 "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
                 "validate": True,
                 "global_steps": self.global_steps,
+                "batch_size": len(test_gen_batch.batch),
+                "num_envs": self.config.envs.num_envs,
             }
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
@@ -624,6 +684,30 @@ class RayPPOTrainer:
                 test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
             else:
                 test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
+
+            env_idx = test_output_gen_batch_padded.non_tensor_batch['env_idx']
+            unique_envs = np.unique(env_idx)
+            last_positions = [np.where(env_idx == uni_env)[0][-1] for uni_env in unique_envs]
+            last_positions = np.array(last_positions)
+            val_rewards = test_output_gen_batch_padded.batch["rewards"][last_positions]
+            val_traj_len = test_output_gen_batch_padded.non_tensor_batch['__num_turns__'][last_positions] + 1
+            
+            metric_dict = dict()
+            metric_dict["mean_rewards"] = val_rewards.mean().item()
+            metric_dict["mean_traj_len"] = val_traj_len.mean().item()
+            
+            data_size = len(test_output_gen_batch_padded.batch["rewards"])
+            sample_num = self.config.trainer.log_val_generations
+            sample_idx = np.random.choice(data_size, sample_num, replace=False)
+            sample_inputs_ids = test_output_gen_batch_padded.batch["prompts"][sample_idx]
+            sample_inputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in sample_inputs_ids]
+            sample_outputs_ids = test_output_gen_batch_padded.batch["responses"][sample_idx]
+            sample_outputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in sample_outputs_ids]
+            sample_scores = test_output_gen_batch_padded.batch["rewards"][sample_idx].cpu().tolist()
+            
+            self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+
+            return metric_dict
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
@@ -1182,11 +1266,41 @@ class RayPPOTrainer:
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer("ref", timing_raw, color="olive"):
+                            
+                            show_obs_prob = self.config.trainer.show_ref_obs_prob
+                            batch.meta_info["return_all_logits"] = show_obs_prob
+                            
                             if not self.ref_in_actor:
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                            
+                            if show_obs_prob:
+                                all_ref_log_prob = ref_log_prob.batch["ref_log_prob"].clone()
+                                response_length = batch.batch["response_mask"].size(1)
+                                ref_log_prob.batch["ref_log_prob"] = ref_log_prob.batch["ref_log_prob"][:, -response_length - 1 : -1]
+                            
                             batch = batch.union(ref_log_prob)
+                            
+                            if show_obs_prob:
+                                lhs_txt = self.tokenizer("<|im_end|>")['input_ids'][0] # 5 = "\n<|im_start|>user\nCurrent"
+                                lhs_idx = find_second_last_in_batch(batch.batch["prompts"], lhs_txt) + 5
+                                rhs_txt = self.tokenizer("What will you do next?")['input_ids']
+                                rhs_idx = find_query_in_batch(rhs_txt, batch.batch["prompts"])
+                                num_turns = torch.sum(batch.batch["prompts"] == lhs_txt, dim=1) // 2
+                                obs_log_mask = num_turns > 1
+                                
+                                mean_log_prob = torch.empty(len(lhs_idx), device=all_ref_log_prob.device)
+                                mean_prob = torch.empty(len(lhs_idx), device=all_ref_log_prob.device)
+                                gt_half = torch.empty(len(lhs_idx), device=all_ref_log_prob.device)
+                                for i in range(len(all_ref_log_prob)):
+                                    mean_log_prob[i] = all_ref_log_prob[i, lhs_idx[i]+1 : rhs_idx[i]].mean()
+                                    mean_prob[i] = (all_ref_log_prob[i, lhs_idx[i]+1 : rhs_idx[i]].exp()).mean()
+                                    gt_half[i] = (all_ref_log_prob[i, lhs_idx[i]+1 : rhs_idx[i]].exp() > 0.5).float().mean()
+                                
+                                metrics["ref/obs_log_prob_mean"] = (mean_log_prob[obs_log_mask].mean().item() if obs_log_mask.sum() > 0 else 0.0)
+                                metrics["ref/obs_prob_mean"] = (mean_prob[obs_log_mask].mean().item() if obs_log_mask.sum() > 0 else 0.0)
+                                metrics["ref/gt_half"] = (gt_half[obs_log_mask].mean().item() if obs_log_mask.sum() > 0 else 0.0)
 
                     # compute values
                     if self.use_critic:

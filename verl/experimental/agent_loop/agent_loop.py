@@ -467,6 +467,11 @@ class AgentLoopWorker:
         captioner = make_captioner(self.config)
         self.env = Env(self.config.envs.env_name, self.config, env, captioner)
         self.env.reset()
+        
+        val_env = make_env(self.config.envs.env_name, self.config.envs.task, self.config)
+        val_captioner = make_captioner(self.config)
+        self.val_env = Env(self.config.envs.env_name, self.config, val_env, val_captioner)
+        self.val_env.reset()
 
     async def generate_sequences(self, batch: DataProto, counter, env_idx: int) -> DataProto:
         """Generate sequences from agent loop.
@@ -519,7 +524,8 @@ class AgentLoopWorker:
         tasks = []
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
-            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], counter, env_idx, **kwargs)))
+            is_val = batch.meta_info.get("validate", False)
+            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], counter, env_idx, is_val, **kwargs)))
         outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(outputs[0])
@@ -531,6 +537,7 @@ class AgentLoopWorker:
         trajectory: dict[str, Any],
         counter,
         env_idx: int,
+        is_val: bool,
         *,
         agent_name: str,
         **kwargs,
@@ -554,7 +561,8 @@ class AgentLoopWorker:
                 tokenizer=self.tokenizer,
                 processor=self.processor,
             )
-            outputs: AgentLoopOutput = await agent_loop.run(self.env, counter, env_idx, sampling_params, **kwargs)
+            env = self.val_env if is_val else self.env
+            outputs: AgentLoopOutput = await agent_loop.run(env, counter, env_idx, sampling_params, is_val, **kwargs)
 
             # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
 

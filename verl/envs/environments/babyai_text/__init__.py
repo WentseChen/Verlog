@@ -29,3 +29,22 @@ PLAY!
 """.strip()
 
     return instruction_prompt
+
+
+# You are in a game. Your goal is to reach the red box. You can do these actions:
+
+# * turn left: turn left
+# * turn right: turn right
+# * go forward: move forward one step
+# * pick up: pick up the object under you
+# * drop: drop the object you hold
+# * toggle: use the object in front of you
+
+# Next, you will see a view.
+
+# Tips:
+
+# * Use **toggle** if the object you want is in front.
+# * Do not do the same action if nothing changes.
+
+# Go!

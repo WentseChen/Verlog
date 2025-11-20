@@ -84,7 +84,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.device_name = get_device_name()
 
     def _forward_micro_batch(
-        self, micro_batch, temperature, calculate_entropy=False
+        self, micro_batch, temperature, calculate_entropy=False, return_all_logits=False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -235,9 +235,12 @@ class DataParallelPPOActor(BasePPOActor):
                 )
 
                 # only return response part:
+                if return_all_logits:
+                    log_probs = full_log_probs.squeeze(-1)  # (bsz, seqlen)
+                else:
+                    log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
                 if calculate_entropy:
                     entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
-                log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
 
             else:  # not using rmpad and no ulysses sp
                 extra_args = {}
@@ -294,7 +297,7 @@ class DataParallelPPOActor(BasePPOActor):
         return grad_norm
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
-    def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
+    def compute_log_prob(self, data: DataProto, calculate_entropy=False, return_all_logits=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
         Args:
@@ -337,7 +340,7 @@ class DataParallelPPOActor(BasePPOActor):
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
                 entropy, log_probs = self._forward_micro_batch(
-                    model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
+                    model_inputs, temperature=temperature, calculate_entropy=calculate_entropy, return_all_logits=return_all_logits,
                 )
             log_probs_lst.append(log_probs)
             if calculate_entropy:
