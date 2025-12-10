@@ -63,7 +63,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
     trainer.total_epochs=60 \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.show_ref_obs_prob=True \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=babyai \

@@ -76,7 +76,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.test_freq=30 \
     trainer.total_epochs=60 \
     trainer.show_ref_obs_prob=False \
-    trainer.mask_noun_tokens=False \
     trainer.val_before_train=True \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=babyai \

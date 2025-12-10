@@ -164,25 +164,6 @@ class ToolAgentLoop(AgentLoopBase):
             response_ids = output.token_ids[: self.response_length]
             response_mask = [1] * len(response_ids)
             
-            if self.config.trainer.mask_noun_tokens:
-                decoded_text = self.tokenizer.decode(response_ids)
-                tokens = [self.tokenizer.decode([token_id]) for token_id in response_ids]
-                words = word_tokenize(decoded_text)
-                pos_tags = pos_tag(words)
-                word_idx = 0
-                for i, token_text in enumerate(tokens):
-                    clean_token = token_text.strip()
-                    pos_tag_label = "UNKNOWN"
-                    if word_idx < len(pos_tags):
-                        word, tag = pos_tags[word_idx]
-                        if clean_token and (clean_token.lower() in word.lower() or word.lower() in clean_token.lower()):
-                            pos_tag_label = tag
-                            if tag.startswith('NN'):
-                                response_mask[i] = 0
-                            word_idx += 1
-                        elif clean_token:
-                            word_idx += 1
-            
             if output.log_probs:
                 response_logprobs = output.log_probs[: self.response_length]
             

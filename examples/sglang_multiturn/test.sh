@@ -65,7 +65,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=60 \
     trainer.val_before_train=True \
     trainer.show_ref_obs_prob=True \
-    trainer.mask_noun_tokens=False \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=babaisai \
     envs.task=env/two_room-goto_win \
