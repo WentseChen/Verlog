@@ -29,6 +29,8 @@ class BabyAILLMAgentsWrapper(gym.Wrapper):
         self.format_penalty = kwargs.get("format_penalty", 0.0)
         self.binary_reward = kwargs.get("binary_reward", False)
         
+        self.previous_observation = None
+        
     def __getattr__(self, name):
         return getattr(self.env, name)
     
@@ -38,6 +40,7 @@ class BabyAILLMAgentsWrapper(gym.Wrapper):
             reward = -self.format_penalty
         if self.binary_reward:
             reward = 1.0 if reward > 0 else reward
+            
         return obs, reward*1.0, terminated, truncated, info
     
     def extract_action(self, action):
@@ -58,6 +61,10 @@ class BabyAILLMAgentsWrapper(gym.Wrapper):
             lower_pred_action = "turn left"
         elif lower_pred_action == "turnright":
             lower_pred_action = "turn right"
+        elif lower_pred_action == "go right":
+            lower_pred_action = "turn right"
+        elif lower_pred_action == "go left":
+            lower_pred_action = "turn left"
         elif lower_pred_action == "goforward":
             lower_pred_action = "go forward"
         elif lower_pred_action == "pickup":
@@ -85,3 +92,22 @@ class BabyAILLMAgentsWrapper(gym.Wrapper):
         }
         
         return full_action, valid_action, is_valid, metrics
+
+        
+        current_observation = obs["text"]["long_term_context"]
+        stuck_action_hint = "\n[Hint: Your previous action doesn't seem to be working. Try a different strategy or action.]\n\n"
+
+        # Check if observation is identical to previous (indicating stuck state)
+        is_stuck = (self.previous_observation is not None 
+                    and current_observation == self.previous_observation
+                    and isinstance(current_observation, str))
+
+        if is_stuck:
+            enhanced_observation = stuck_action_hint + current_observation
+        else:
+            enhanced_observation = current_observation
+
+        # Update previous observation for next comparison
+        self.previous_observation = current_observation
+        obs["text"]["long_term_context"] = enhanced_observation
+        return obs

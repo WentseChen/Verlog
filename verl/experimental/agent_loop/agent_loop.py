@@ -149,6 +149,8 @@ class AgentLoopMetrics(BaseModel):
 
     generate_sequences: float = 0.0
     tool_calls: float = 0.0
+    loop_counts: int = 0
+    loop_rate: float = 0.0
 
 
 class AgentLoopOutput(BaseModel):
@@ -778,6 +780,7 @@ class AgentLoopWorker:
             non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
 
         metrics = [input.metrics.model_dump() for input in inputs]
+        
         # Collect extra fields from all inputs and convert them to np.ndarray
         extra_fields = {}
         all_keys = set(key for input_item in inputs for key in input_item.extra_fields)
@@ -951,9 +954,9 @@ class AgentLoopManager:
 
         # calculate performance metrics
         metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
-        timing = self._performance_metrics(metrics, output)
+        timing, loop_stats = self._performance_metrics(metrics, output)
 
-        output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        output.meta_info = {"timing": timing, "loop_stats": loop_stats, **outputs[0].meta_info}
         return output
 
     def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:
@@ -976,7 +979,15 @@ class AgentLoopManager:
         timing["agent_loop/slowest/prompt_length"] = attention_mask[:prompt_length].sum().item()
         timing["agent_loop/slowest/response_length"] = attention_mask[prompt_length:].sum().item()
 
-        return timing
+        loop_stats = {}
+        loop_counts = np.array([metric["loop_counts"] for chunk in metrics for metric in chunk])
+    
+        loop_stats["agent_loop/loop_counts/min"] = loop_counts.min()
+        loop_stats["agent_loop/loop_counts/max"] = loop_counts.max()
+        loop_stats["agent_loop/loop_counts/mean"] = loop_counts.mean()
+        loop_stats["agent_loop/loop_counts/std"] = loop_counts.std()
+
+        return timing, loop_stats
 
     def wake_up(self):
         """Wake up all rollout replica instances."""

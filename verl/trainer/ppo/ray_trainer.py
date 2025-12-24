@@ -1195,6 +1195,9 @@ class RayPPOTrainer:
 
                             timing_raw.update(gen_batch_output.meta_info["timing"])
                             gen_batch_output.meta_info.pop("timing", None)
+                            
+                            metrics.update(gen_batch_output.meta_info["loop_stats"])
+                            gen_batch_output.meta_info.pop("loop_stats", None)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         if self.reward_fn is None:

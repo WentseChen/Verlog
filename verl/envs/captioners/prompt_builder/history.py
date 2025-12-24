@@ -125,6 +125,16 @@ class HistoryPromptBuilder:
                     message_parts.append("Current Observation:")
                     if self._last_short_term_obs:
                         message_parts.append(self._last_short_term_obs)
+                    
+                    # add a hint if the previous action seems to be stuck
+                    if idx >= 2 and idx - 2 < len(self._events):
+                        prev_event = self._events[idx - 2]
+                        if prev_event["type"] == "observation":
+                            current_text = event.get("text", "")
+                            prev_text = prev_event.get("text", "")
+                            if current_text == prev_text and current_text:
+                                message_parts.insert(0, "\n[Hint: Your previous action doesn't seem to be working. Try a different strategy or action.]\n")
+                    
                 else:
                     message_parts.append("Observation:")
 

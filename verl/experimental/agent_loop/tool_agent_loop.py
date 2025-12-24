@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Any, Optional, List
 from uuid import uuid4
 import numpy as np
+from datetime import datetime
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
@@ -110,6 +111,35 @@ class ToolAgentLoop(AgentLoopBase):
         cls.interaction_config_file = config.actor_rollout_ref.rollout.multi_turn.interaction_config_path
         if cls.interaction_config_file:
             cls.interaction_map: dict[str, BaseInteraction] = cls._initialize_interactions(cls.interaction_config_file)
+        
+        # Initialize trajectory save directory
+        cls.trajectory_save_dir = config.actor_rollout_ref.rollout.multi_turn.get("trajectory_save_dir", "./trajectories_2")
+        os.makedirs(cls.trajectory_save_dir, exist_ok=True)
+        print(f"Trajectory save directory: {cls.trajectory_save_dir}")
+
+    def _detect_loop(self, messages: list[dict[str, Any]]) -> bool:
+        """
+        Detect if a loop occurred by checking if the last message contains a hint.
+        
+        Args:
+            messages: List of message dictionaries with 'role' and 'content' keys
+            
+        Returns:
+            bool: True if a hint is detected in the last user message, False otherwise
+        """
+        if not messages:
+            return False
+        
+        # Find the last user message
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                # Check if the content contains the hint pattern
+                if "[Hint:" in content or "[Hint " in content:
+                    return True
+                break
+        
+        return False
 
     @rollout_trace_op
     async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool, **kwargs) -> List[AgentLoopOutput]:
@@ -121,6 +151,17 @@ class ToolAgentLoop(AgentLoopBase):
             
         metrics = {}
         request_id = uuid4().hex
+        
+        # Initialize loop tracking in metrics (for both val and training)
+        all_loop_counts = 0
+        
+        # Initialize trajectory storage for validation
+        trajectory = {
+            "request_id": request_id,
+            "env_idx": env_idx,
+            "timestamp": datetime.now().isoformat(),
+            "turns": [],
+        } if is_val else None
         
         prompt_ids = await self.loop.run_in_executor(
             None,
@@ -162,15 +203,37 @@ class ToolAgentLoop(AgentLoopBase):
                 lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
             )
             
-            metrics.update(info.get("metrics", {}))
-            
             last_prompt_ids = copy.deepcopy(prompt_ids)
             is_full = await counter.is_full.remote()
             if is_full and not is_val:
                 break
             
+            # Store observation before step (always, for loop detection)
+            observation = copy.deepcopy(messages)
+            
             messages, reward, terminated, truncated, info = env.step(actions)
             done = np.logical_or(terminated, truncated)
+            
+            # Detect loop: check if the observation contains a hint (for both val and training)
+            is_loop = self._detect_loop(observation)
+            if is_loop:
+                all_loop_counts += 1
+            
+            # Update metrics with info and loop tracking
+            metrics.update(info.get("metrics", {}))
+            metrics["loop_counts"] = 1.0 if is_loop else 0.0
+            metrics["loop_rate"] = all_loop_counts / (num_turns + 1) if (num_turns + 1) > 0 else 0.0
+            
+            # Record turn data in trajectory (only for validation)
+            if is_val:
+                turn_record = {
+                    "turn": num_turns,
+                    "observation": observation,
+                    "action": actions,
+                    "reward": float(reward),
+                    "done": bool(done),
+                }
+                trajectory["turns"].append(turn_record)
             
             if done and is_val:
                 break
@@ -222,8 +285,35 @@ class ToolAgentLoop(AgentLoopBase):
         )
         outputs.append(turn_data)
         
+        # Save trajectory for validation
+        if is_val and trajectory:
+            trajectory["total_turns"] = num_turns
+            trajectory["final_reward"] = float(reward)
+            trajectory["total_reward"] = sum(turn["reward"] for turn in trajectory["turns"])
+            await self._save_trajectory(trajectory)
+        
         return outputs
 
+    async def _save_trajectory(self, trajectory: dict):
+        """Save trajectory to a JSON file."""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"trajectory_{trajectory['env_idx']}_{timestamp}_{trajectory['request_id'][:8]}.json"
+            filepath = os.path.join(self.trajectory_save_dir, filename)
+            
+            # Save asynchronously
+            await self.loop.run_in_executor(
+                None,
+                lambda: self._write_trajectory_file(filepath, trajectory)
+            )
+            logger.info(f"Saved trajectory to {filepath}")
+        except Exception as e:
+            logger.error(f"Failed to save trajectory: {e}")
+    
+    def _write_trajectory_file(self, filepath: str, trajectory: dict):
+        """Write trajectory to file (runs in executor)."""
+        with open(filepath, 'w') as f:
+            json.dump(trajectory, f, indent=2)
 
     @classmethod
     def _initialize_interactions(cls, interaction_config_file):

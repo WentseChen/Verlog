@@ -66,8 +66,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.show_ref_obs_prob=False \
     trainer.val_before_train=False \
     envs.num_envs=${NUM_ENVS} \
-    envs.env_name=crafter \
-    envs.task=default \
+    envs.env_name=babyai \
+    envs.task=BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \

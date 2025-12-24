@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=ppo_epoches
+#SBATCH --job-name=loop
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --mem=200G
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=4
 #SBATCH --partition=gpuA40x4
 #SBATCH --account=bfoz-delta-gpu
 #SBATCH --time=47:59:59
@@ -82,7 +82,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=True \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=babyai \
-    envs.task=BabyAI-MixedTrainLocal-v0/open \
+    envs.task=BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \
