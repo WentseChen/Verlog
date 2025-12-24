@@ -22,7 +22,7 @@ __all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
 
 from collections import defaultdict
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, List
 
 import numpy as np
 import torch
@@ -214,8 +214,12 @@ def compute_gae_advantage_return(
     token_level_rewards: torch.Tensor,
     values: torch.Tensor,
     response_mask: torch.Tensor,
-    gamma: torch.Tensor,
-    lam: torch.Tensor,
+    dones: torch.Tensor,
+    token_gamma: float = 1.0,
+    step_gamma: float = 1.0,
+    token_lam: float = 1.0,
+    step_lam: float = 1.0,
+    episode_structure = None,
 ):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
@@ -238,21 +242,110 @@ def compute_gae_advantage_return(
             shape: (bs, response_length)
 
     """
+    # Convert all tensor inputs to float32
+    token_level_rewards_fp32 = token_level_rewards.float()
+    values_fp32 = values.float()
+    response_mask_fp32 = response_mask.float()
+    dones_fp32 = dones.float()
+    step_gamma_fp32 = float(step_gamma)
+    step_lam_fp32 = float(step_lam)
+    token_gamma_fp32 = float(token_gamma)
+    token_lam_fp32 = float(token_lam)
+    
+    # Call the original function with float32 inputs
+    advantages_fp32, returns_fp32 = compute_gae_advantage_return_core(
+        token_level_rewards=token_level_rewards_fp32,
+        values=values_fp32,
+        response_mask=response_mask_fp32,
+        step_gamma=step_gamma_fp32,
+        step_lam=step_lam_fp32,
+        token_gamma=token_gamma_fp32,
+        token_lam=token_lam_fp32,
+        dones=dones_fp32,
+        episode_structure=episode_structure,
+    )
+    
+    return advantages_fp32, returns_fp32
+
+def compute_gae_advantage_return_core(
+    token_level_rewards: torch.Tensor,
+    values: torch.Tensor,
+    response_mask: torch.Tensor,
+    dones: torch.Tensor,
+    episode_structure: List[List[int]],
+    token_gamma: float = 1.0,
+    step_gamma: float = 1.0,
+    token_lam: float = 1.0,
+    step_lam: float = 1.0,
+):
+
     with torch.no_grad():
-        nextvalues = 0
-        lastgaelam = 0
+        
+        # turn level
+        turn_values = values[:,0].clone()                   # [B]
+        turn_rewards = token_level_rewards.clone().sum(-1)  # [B]
+
+        turn_advantages = torch.zeros_like(turn_values)
+        turn_returns = torch.zeros_like(turn_values)
+
+        for ep_indices in episode_structure:
+            
+            ep_rewards = turn_rewards[ep_indices].clone()
+            ep_values = turn_values[ep_indices].clone()
+            ep_dones = dones[ep_indices].clone()
+
+            T = len(ep_indices)
+            ep_advantages = torch.zeros_like(ep_values)
+            gae = 0
+
+            for t in reversed(range(T)):
+                if t == T - 1:
+                    ep_advantages[t] = 0.0
+                else:
+                    next_value = ep_values[t + 1]
+                    next_non_terminal = 1.0 - ep_dones[t] * 1.0
+                    delta = ep_rewards[t] + step_gamma * next_value * next_non_terminal - ep_values[t]
+                    gae = delta + step_gamma * step_lam * next_non_terminal * gae
+                    ep_advantages[t] = gae
+
+            ep_returns = ep_advantages + ep_values
+            
+            turn_advantages[ep_indices] = ep_advantages
+            turn_returns[ep_indices] = ep_returns
+            
+        # put turn-level results back to each turn
+        nextvalues = torch.zeros_like(turn_values) # (bs,)
+        lastgaelam = torch.zeros_like(turn_values) # (bs,)
+        for ep_indices in episode_structure:
+            
+            ep_dones = dones[ep_indices].clone()
+            ep_values = turn_values[ep_indices].clone()
+            next_ep_values = torch.cat([ep_values[1:], torch.tensor([ep_values[-1]/step_gamma], device=ep_values.device)])
+            next_ep_values[:-1] *= (1 - ep_dones[:-1] * 1.0)
+            nextvalues[ep_indices] = next_ep_values * step_gamma
+            
+            ep_gaelam = turn_advantages[ep_indices].clone()
+            next_ep_gaelam = torch.cat([ep_gaelam[1:], torch.zeros_like(ep_gaelam[:1])])
+            next_ep_gaelam[:-1] *= (1 - ep_dones[:-1] * 1.0)
+            lastgaelam[ep_indices] = next_ep_gaelam * step_gamma * step_lam
+    
+        # token level
         advantages_reversed = []
         gen_len = token_level_rewards.shape[-1]
 
         for t in reversed(range(gen_len)):
-            delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
-            lastgaelam_ = delta + gamma * lam * lastgaelam
+            
+            # Method 1: when token gamma = token lam = 1.0
+            assert token_gamma == 1.0 and token_lam == 1.0, "Currently only support token_gamma=1.0 and token_lam=1.0"
+            token_adv = token_level_rewards[:, t:].sum(-1) + nextvalues - values[:, t] + lastgaelam 
+            advantages_reversed.append(token_adv)
 
-            # skip values and TD-error on observation tokens
-            nextvalues = values[:, t] * response_mask[:, t] + (1 - response_mask[:, t]) * nextvalues
-            lastgaelam = lastgaelam_ * response_mask[:, t] + (1 - response_mask[:, t]) * lastgaelam
-
-            advantages_reversed.append(lastgaelam)
+            # Method 2: general case
+            # delta = token_level_rewards[:, t] + token_gamma * nextvalues - values[:, t]
+            # lastgaelam_ = delta + token_gamma * token_lam * lastgaelam
+            # nextvalues = values[:, t] * response_mask[:, t] + (1 - response_mask[:, t]) * nextvalues
+            # lastgaelam = lastgaelam_ * response_mask[:, t] + (1 - response_mask[:, t]) * lastgaelam
+            # advantages_reversed.append(lastgaelam * response_mask[:, t])
         advantages = torch.stack(advantages_reversed[::-1], dim=1)
 
         returns = advantages + values
@@ -1383,6 +1476,9 @@ def compute_value_loss(
     vf_losses1 = (vpreds - returns) ** 2
     vf_losses2 = (vpredclipped - returns) ** 2
     clipped_vf_losses = torch.max(vf_losses1, vf_losses2)
+    
+    clipped_vf_losses[:,0] = clipped_vf_losses[:,0] * 3.0
+    
     vf_loss = 0.5 * agg_loss(loss_mat=clipped_vf_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), response_mask)
     return vf_loss, vf_clipfrac

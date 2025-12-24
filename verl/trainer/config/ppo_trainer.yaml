@@ -66,10 +66,12 @@ algorithm:
   _target_: verl.trainer.config.AlgoConfig
 
   # Discount factor for future rewards
-  gamma: 1.0
+  token_gamma: 1.0
+  step_gamma: 0.99
 
   # Trade-off between bias and variance in the GAE estimator
-  lam: 1.0
+  token_lam: 1.0
+  step_lam: 0.95
 
   # Advantage estimator type: "gae", "grpo", "reinforce_plus_plus", etc.
   adv_estimator: gae
@@ -157,7 +159,7 @@ trainer:
   logger: ["console", "wandb"]
 
   # Number of generations to log during validation
-  log_val_generations: 0
+  log_val_generations: 1
 
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
@@ -201,6 +203,12 @@ trainer:
 
   # Number of iterations to warm up the critic before updating policy
   critic_warmup: 0
+
+  # During critic warmup, batch size will be critic_warmup_batch_repeat_times * original batch size
+  critic_warmup_batch_repeat_times: 1
+
+  # During critic warmpup, we will only use 1/critic_warmup_batch_divide_ratio of the batch to update critic
+  critic_warmup_batch_divide_ratio: 1
 
   # Default path to distributed filesystem for saving checkpoints
   default_hdfs_dir: null
@@ -328,3 +336,62 @@ ray_kwargs:
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null
+
+
+envs:
+
+  # number of parallel environments
+  num_envs: 32
+
+  # name of the environment, e.g., "babyai", "crafter", "babaisai", etc.
+  env_name: babyai
+
+  # scenario name for the environment
+  task: BabyAI-MixedTrainLocal-v0/goto
+
+  # penalty for agent taking invalid actions
+  format_penalty: 0.1
+
+  # If Ture, all rewards (except format penalty) are either 0 or 1
+  binary_reward: True
+
+  captioner:
+
+    # type of captioner, e.g., "cot", "naive", etc.
+    type: cot
+
+    # maximum number of turns of actions and observations to keep in history
+    max_text_history: 1
+
+    # maximum number of turns of chain-of-thought reasoning path to keep in history
+    max_cot_history: 1
+
+    # maximum number of images to keep in history
+    max_image_history: 0
+
+  babyai_kwargs:
+
+    num_dists: 0
+
+  babaisai_kwargs: 
+
+    add_ruleset: True
+
+  crafter_kwargs:
+    area: [64, 64]              
+    view: [9, 9]            
+    size: [256, 256] # Image size in Crafter
+    reward: True                       
+    seed: null                  
+    max_episode_steps: 2000 
+     
+  minihack_kwargs: 
+    character: "@"
+    max_episode_steps: 100
+    penalty_step: -0.01         
+    penalty_time: 0.0           
+    penalty_mode: constant      
+    savedir: null
+    save_ttyrec_every: 0
+    autopickup: False           
+    skip_more: True

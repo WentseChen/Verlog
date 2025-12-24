@@ -58,6 +58,10 @@ class BabyAILLMAgentsWrapper(gym.Wrapper):
             lower_pred_action = "turn left"
         elif lower_pred_action == "turnright":
             lower_pred_action = "turn right"
+        elif lower_pred_action == "go right":
+            lower_pred_action = "turn right"
+        elif lower_pred_action == "go left":
+            lower_pred_action = "turn left"
         elif lower_pred_action == "goforward":
             lower_pred_action = "go forward"
         elif lower_pred_action == "pickup":

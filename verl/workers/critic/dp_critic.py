@@ -35,8 +35,57 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs
 from verl.workers.critic import BasePPOCritic
 
+import verl.utils.torch_functional as verl_F
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def get_off_policy_metric(returns, vpreds, response_mask, values, cliprange_value):
+    """
+    Calculate off-policy metrics for value function analysis.
+    
+    Args:
+        returns: Target returns
+        vpreds: Value predictions from current forward pass
+        response_mask: Mask indicating valid response tokens
+        values: Old value predictions (from data collection)
+        cliprange_value: Clipping range for value function
+        
+    Returns:
+        Dictionary containing off-policy metrics
+    """
+    with torch.no_grad():
+        # Calculate value function standard deviation (prediction error)
+        vf_diff = (vpreds - returns) * response_mask
+        vf_std = torch.sqrt(torch.sum(vf_diff**2) / torch.sum(response_mask))
+        
+        # Calculate clipped value predictions
+        vpredclipped = verl_F.clip_by_value(
+            vpreds, 
+            values - cliprange_value, 
+            values + cliprange_value
+        )
+        
+        # Calculate losses for clipped and unclipped predictions
+        vf_losses1 = (vpreds - returns) ** 2
+        vf_losses2 = (vpredclipped - returns) ** 2
+        clipped_vf_losses = torch.max(vf_losses1, vf_losses2)
+        
+        # Determine which predictions were clipped
+        is_clipped = (vf_losses2 > vf_losses1).float()
+        
+        # Calculate expected value and norm of clipped predictions
+        E_clip_value = verl_F.masked_mean(is_clipped * vpreds, response_mask)
+        E_clip_norm = verl_F.masked_mean(is_clipped * vpreds ** 2, response_mask)
+        
+        metrics = {
+            "critic/vf_loss_std": vf_std.item(),
+            "critic/vf_clip_value": E_clip_value.item(),
+            "critic/vf_clip_norm": E_clip_norm.item(),
+        }
+        
+    return metrics
 
 
 class DataParallelPPOCritic(BasePPOCritic):
@@ -234,6 +283,16 @@ class DataParallelPPOCritic(BasePPOCritic):
                         cliprange_value=self.config.cliprange_value,
                         loss_agg_mode=self.config.loss_agg_mode,
                     )
+                    
+                    # Calculate off-policy metrics
+                    off_policy_metrics = get_off_policy_metric(
+                        returns=returns,
+                        vpreds=vpreds,
+                        response_mask=response_mask,
+                        values=values,
+                        cliprange_value=self.config.cliprange_value
+                    )
+                    
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
@@ -251,6 +310,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                             "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
                         }
                     )
+                    
+                    # Add off-policy metrics to micro_batch_metrics
+                    micro_batch_metrics.update(off_policy_metrics)
 
                     append_to_dict(metrics, micro_batch_metrics)
 
