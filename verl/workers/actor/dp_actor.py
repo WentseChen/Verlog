@@ -24,6 +24,7 @@ import torch
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.tensor import DTensor
+import numpy as np
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
@@ -461,6 +462,22 @@ class DataParallelPPOActor(BasePPOActor):
                         config=self.config,
                         rollout_is_weights=rollout_is_weights,
                     )
+                    
+                    with torch.no_grad():
+                        clip_ratio = self.config.clip_ratio  # Clipping parameter ε for standard PPO. See https://arxiv.org/abs/1707.06347.
+                        clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
+                        clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio
+                        ratio = torch.exp(log_prob - old_log_prob)
+                        ratio_clipped = torch.clamp(
+                            ratio, 1 - clip_ratio_low, 1 + clip_ratio_high
+                        )
+                        pg_losses1 = -advantages * ratio
+                        pg_losses2 = -advantages * ratio_clipped
+                        clipped_indicator = (pg_losses2 > pg_losses1).float()
+                        clipped_ratio_A = clipped_indicator * ratio * advantages
+                        E_clipped_ratio_A = verl_F.masked_mean(clipped_ratio_A, response_mask)
+                        clipped_norm = torch.norm(clipped_ratio_A, p=2)
+                        E_clipped_norm = verl_F.masked_mean(clipped_norm, response_mask)
 
                     if entropy_coeff != 0:
                         entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
@@ -488,9 +505,24 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         loss = policy_loss * loss_scale_factor
                     loss.backward()
+                    
+                    # calculate correlation between ratio and advantage for analysis
+                    with torch.no_grad():
+                        log_ratio = log_prob - old_log_prob
+                        ratio = torch.exp(log_ratio)  # (bsz, response_length)
+                        masked_ratio = ratio * response_mask
+                        masked_advantages = advantages * response_mask
+                        numerator = torch.sum((masked_ratio - 1.0) * masked_advantages)
+                        denominator = torch.sqrt(
+                            torch.sum((masked_ratio - 1.0) ** 2) * torch.sum(masked_advantages**2) + 1e-8
+                        )
+                        corr = numerator / (denominator + 1e-8)
 
                     micro_batch_metrics.update(
                         {
+                            "actor/pg_clip_mean": E_clipped_ratio_A.detach().item(),
+                            "actor/pg_clip_norm": E_clipped_norm.detach().item(),
+                            "actor/ratio_adv_corr": corr.detach().item(),
                             "actor/pg_loss": pg_loss.detach().item() * loss_scale_factor,
                             "actor/pg_clipfrac": pg_clipfrac.detach().item(),
                             "actor/ppo_kl": ppo_kl.detach().item(),
@@ -503,4 +535,12 @@ class DataParallelPPOActor(BasePPOActor):
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
+        
+        if "actor/ppo_kl" in metrics:
+            ppo_kl = metrics["actor/ppo_kl"]
+            if isinstance(ppo_kl, list):
+                ppo_kl = np.array(ppo_kl)
+                ppo_kl_var = np.var(ppo_kl)
+                metrics["actor/ppo_kl_var"] = [ppo_kl_var]
+        
         return metrics

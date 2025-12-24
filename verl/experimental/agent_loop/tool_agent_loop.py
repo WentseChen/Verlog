@@ -33,19 +33,6 @@ from verl.utils.rollout_trace import rollout_trace_op
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-import nltk
-from nltk import pos_tag, word_tokenize
-
-# Download required NLTK data (run once)
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt')
-try:
-    nltk.data.find('taggers/averaged_perceptron_tagger')
-except LookupError:
-    nltk.download('averaged_perceptron_tagger')
-
 class AgentState(Enum):
     PENDING = "pending"
     GENERATING = "generating"
@@ -163,6 +150,9 @@ class ToolAgentLoop(AgentLoopBase):
             # truncate response_ids to response_length
             response_ids = output.token_ids[: self.response_length]
             response_mask = [1] * len(response_ids)
+            
+            assert len(prompt_ids) <= self.prompt_length
+            assert len(response_ids) <= self.response_length
             
             if output.log_probs:
                 response_logprobs = output.log_probs[: self.response_length]

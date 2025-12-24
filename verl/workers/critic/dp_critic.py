@@ -35,6 +35,8 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs
 from verl.workers.critic import BasePPOCritic
 
+import verl.utils.torch_functional as verl_F
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -234,6 +236,18 @@ class DataParallelPPOCritic(BasePPOCritic):
                         cliprange_value=self.config.cliprange_value,
                         loss_agg_mode=self.config.loss_agg_mode,
                     )
+                    vf_diff = (vpreds - returns) * response_mask
+                    vf_std = torch.sqrt(torch.sum(vf_diff**2) / torch.sum(response_mask))
+                    
+                    with torch.no_grad():
+                        vpredclipped = verl_F.clip_by_value(vpreds, values - self.config.cliprange_value, values + self.config.cliprange_value)
+                        vf_losses1 = (vpreds - returns) ** 2
+                        vf_losses2 = (vpredclipped - returns) ** 2
+                        clipped_vf_losses = torch.max(vf_losses1, vf_losses2)
+                        is_clipped = (vf_losses2 > vf_losses1).float()
+                        E_clip_value = verl_F.masked_mean(is_clipped * vpreds, response_mask)
+                        E_clip_norm = verl_F.masked_mean(is_clipped * vpreds ** 2, response_mask)
+                    
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
@@ -246,9 +260,12 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                     micro_batch_metrics.update(
                         {
+                            "critic/vf_std": vf_std.detach().item(),
                             "critic/vf_loss": vf_loss.detach().item() * loss_scale_factor,
                             "critic/vf_clipfrac": vf_clipfrac.detach().item(),
                             "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
+                            "critic/vf_clip_value": E_clip_value.detach().item(),
+                            "critic/vf_clip_norm": E_clip_norm.detach().item(),
                         }
                     )
 

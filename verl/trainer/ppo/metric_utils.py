@@ -211,8 +211,11 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     # multi-turn conversation
     if "__num_turns__" in batch.non_tensor_batch:
         num_turns = batch.non_tensor_batch["__num_turns__"]
-        metrics["num_turns/min"] = num_turns.min()
-        metrics["num_turns/max"] = num_turns.max()
+        starts = np.where(num_turns == 0)[0]
+        ends = np.append(starts[1:], len(num_turns))
+        traj_lengths = ends - starts 
+        metrics["num_turns/min"] = traj_lengths.min()
+        metrics["num_turns/max"] = traj_lengths.max()
         metrics["num_turns/mean"] = num_turns.mean()
 
     if "tool_call_counts" in batch.non_tensor_batch:

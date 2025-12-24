@@ -1,22 +1,7 @@
-#!/bin/bash
-#SBATCH --job-name=ppo_epoches
-#SBATCH --output=logs/slurm-%j.out
-#SBATCH --error=logs/slurm-%j.err
-#SBATCH --mem=200G
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=8
-#SBATCH --partition=gpuA40x4
-#SBATCH --account=bfoz-delta-gpu
-#SBATCH --time=47:59:59
-#SBATCH --gpus-per-node=4
-#SBATCH --reservation=RH9
 
 source /u/wchen11/anaconda3/bin/activate 
 conda activate verlog
 cd /u/wchen11/Verlog
-
-ulimit -n 65535
 
 NUM_GPUS_PER_NODE=4
 unset ROCR_VISIBLE_DEVICES
@@ -27,11 +12,11 @@ CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
 
 NUM_ENVS=32
 BATCH_SIZE=256
-MINI_BATCH_SIZE=$((BATCH_SIZE))
-MICRO_BATCH_SIZE=8
+MINI_BATCH_SIZE=$((BATCH_SIZE / 2))
+MICRO_BATCH_SIZE=8 
 FORWARD_BATCH_SIZE=$((4 * MICRO_BATCH_SIZE))
 OFFLOAD=false
-PPO_EPOCHS=3
+PPO_EPOCHS=1
 
 export VLLM_USE_V1=1
 
@@ -67,22 +52,22 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=True \
     trainer.balance_batch=False \
-    trainer.critic_warmup=10 \
-    trainer.critic_warmup_batch_repeat_times=40 \
-    trainer.critic_warmup_batch_divide_ratio=4 \
+    trainer.critic_warmup=0 \
+    trainer.critic_warmup_batch_repeat_times=0 \
+    trainer.critic_warmup_batch_divide_ratio=1 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='zero' \
-    trainer.experiment_name='ppo_epoch' \
+    trainer.experiment_name='debug' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=30 \
     trainer.total_epochs=60 \
     trainer.show_ref_obs_prob=False \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     envs.num_envs=${NUM_ENVS} \
-    envs.env_name=babyai \
-    envs.task=BabyAI-MixedTrainLocal-v0/open \
+    envs.env_name=crafter \
+    envs.task=default \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \
