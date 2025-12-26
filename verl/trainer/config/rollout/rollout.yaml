@@ -133,13 +133,13 @@ val_kwargs:
   top_p: 1.0
 
   # Sampling temperature for rollout.
-  temperature: 0
+  temperature: 1.0
 
   # whether to repeat n times for validation
   n: 1
 
   # Whether to sample during training rollout. False uses greedy sampling.
-  do_sample: False
+  do_sample: True
 
 # Multi-turn interaction config for tools or chat.
 multi_turn:
@@ -206,7 +206,7 @@ agent:
   num_workers: 8
 
   # default agent loop to use if `agent_name` not set in RL dataset
-  default_agent_loop: single_turn_agent
+  default_agent_loop: tool_agent
 
   # custom agent loop config path, which should contain list of configs to intialize AgentLoop instances.
   # https://hydra.cc/docs/advanced/instantiate_objects/overview/
