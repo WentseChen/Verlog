@@ -56,33 +56,46 @@ def get_off_policy_metric(returns, vpreds, response_mask, values, cliprange_valu
         Dictionary containing off-policy metrics
     """
     with torch.no_grad():
-        # Calculate value function standard deviation (prediction error)
-        vf_diff = (vpreds - returns) * response_mask
-        vf_std = torch.sqrt(torch.sum(vf_diff**2) / torch.sum(response_mask))
         
-        # Calculate clipped value predictions
+        # get clipped value predictions
         vpredclipped = verl_F.clip_by_value(
             vpreds, 
             values - cliprange_value, 
             values + cliprange_value
         )
-        
-        # Calculate losses for clipped and unclipped predictions
         vf_losses1 = (vpreds - returns) ** 2
         vf_losses2 = (vpredclipped - returns) ** 2
         clipped_vf_losses = torch.max(vf_losses1, vf_losses2)
-        
-        # Determine which predictions were clipped
         is_clipped = (vf_losses2 > vf_losses1).float()
         
-        # Calculate expected value and norm of clipped predictions
+        # get clipped value statistics
         E_clip_value = verl_F.masked_mean(is_clipped * vpreds, response_mask)
         E_clip_norm = verl_F.masked_mean(is_clipped * vpreds ** 2, response_mask)
+        E_value = verl_F.masked_mean(vpreds, response_mask)
+        E_norm = verl_F.masked_mean(vpreds ** 2, response_mask)
+        clip_value_ratio = E_clip_value / (E_value + 1e-8)
+        clip_norm_ratio = E_clip_norm / (E_norm + 1e-8)
+        
+        # get delta statistics
+        delta = (vpreds - returns)
+        E_delta = verl_F.masked_mean(delta, response_mask)
+        E_delta_norm = verl_F.masked_mean(delta ** 2, response_mask)
+        std_delta = torch.sqrt(E_delta_norm - E_delta ** 2 + 1e-8)
+        
+        delta_clip = torch.clamp(delta, -cliprange_value, cliprange_value)
+        E_delta_clip = verl_F.masked_mean(delta_clip, response_mask)
+        E_delta_clip_norm = verl_F.masked_mean(delta_clip ** 2, response_mask)
+        std_delta_clip = torch.sqrt(E_delta_clip_norm - E_delta_clip ** 2 + 1e-8)
         
         metrics = {
-            "critic/vf_loss_std": vf_std.item(),
             "critic/vf_clip_value": E_clip_value.item(),
             "critic/vf_clip_norm": E_clip_norm.item(),
+            "critic/vf_clip_value_ratio": clip_value_ratio.item(),
+            "critic/vf_clip_norm_ratio": clip_norm_ratio.item(),
+            "critic/delta_mean": E_delta.item(),
+            "critic/delta_std": std_delta.item(),
+            "critic/delta_clip_mean": E_delta_clip.item(),
+            "critic/delta_clip_std": std_delta_clip.item(),
         }
         
     return metrics

@@ -1,21 +1,7 @@
-#!/bin/bash
-#SBATCH --job-name=loop
-#SBATCH --output=logs/slurm-%j.out
-#SBATCH --error=logs/slurm-%j.err
-#SBATCH --mem=200G
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=4
-#SBATCH --partition=gpuA100x4
-#SBATCH --account=bfoz-delta-gpu
-#SBATCH --time=23:59:59
-#SBATCH --gpus-per-node=4
 
 source /u/wchen11/anaconda3/bin/activate 
 conda activate verlog
 cd /u/wchen11/Verlog
-
-ulimit -n 65535
 
 NUM_GPUS_PER_NODE=4
 unset ROCR_VISIBLE_DEVICES
@@ -26,11 +12,11 @@ CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
 
 NUM_ENVS=32
 BATCH_SIZE=256
-MINI_BATCH_SIZE=$((BATCH_SIZE))
-MICRO_BATCH_SIZE=8
+MINI_BATCH_SIZE=$((BATCH_SIZE / 2))
+MICRO_BATCH_SIZE=8 
 FORWARD_BATCH_SIZE=$((4 * MICRO_BATCH_SIZE))
 OFFLOAD=false
-PPO_EPOCHS=5
+PPO_EPOCHS=1
 
 export VLLM_USE_V1=1
 
@@ -52,7 +38,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.ppo_epochs=${PPO_EPOCHS} \
-    actor_rollout_ref.actor.entropy_coeff=0.0 \
+    actor_rollout_ref.actor.entropy_coeff=0.001 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=${OFFLOAD} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${OFFLOAD} \
@@ -66,18 +52,18 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=True \
     trainer.balance_batch=False \
-    trainer.critic_warmup=10 \
-    trainer.critic_warmup_batch_repeat_times=40 \
-    trainer.critic_warmup_batch_divide_ratio=4 \
+    trainer.critic_warmup=0 \
+    trainer.critic_warmup_batch_repeat_times=0 \
+    trainer.critic_warmup_batch_divide_ratio=1 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='zero' \
-    trainer.experiment_name='ppo_epoch' \
+    trainer.experiment_name='debug' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=30 \
     trainer.total_epochs=60 \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=babyai \
     envs.task=BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to \

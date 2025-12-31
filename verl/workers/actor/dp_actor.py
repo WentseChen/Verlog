@@ -67,10 +67,20 @@ def compute_off_policy_metrics(log_prob, old_log_prob, advantages, response_mask
         pg_losses1 = -advantages * ratio
         pg_losses2 = -advantages * ratio_clipped
         clipped_indicator = (pg_losses2 > pg_losses1).float()
-        clipped_ratio_A = clipped_indicator * ratio * advantages
-        E_clipped_ratio_A = verl_F.masked_mean(clipped_ratio_A, response_mask)
-        clipped_norm = torch.norm(clipped_ratio_A, p=2)
+        clipped_J = clipped_indicator * ratio * advantages
+        E_clipped_J = verl_F.masked_mean(clipped_J, response_mask)
+        clipped_norm = torch.norm(clipped_J, p=2)
         E_clipped_norm = verl_F.masked_mean(clipped_norm, response_mask)
+        
+        E_J = verl_F.masked_mean(-pg_losses1, response_mask)
+        J_norm = torch.norm(pg_losses1, p=2)
+        E_J_norm = verl_F.masked_mean(J_norm, response_mask)
+        
+        E_clipped_ratio = E_clipped_J / (E_J + 1e-8)
+        E_clipped_norm_ratio = E_clipped_norm / (E_J_norm + 1e-8)
+        
+        J_PPO = torch.minimum(pg_losses1, pg_losses2)
+        estimated_improvement = -verl_F.masked_mean(J_PPO, response_mask)
         
         # Compute ratio-advantage correlation
         masked_ratio = ratio * response_mask
@@ -80,11 +90,43 @@ def compute_off_policy_metrics(log_prob, old_log_prob, advantages, response_mask
             torch.sum((masked_ratio - 1.0) ** 2) * torch.sum(masked_advantages**2) + 1e-8
         )
         corr = numerator / (denominator + 1e-8)
+        
+        # distribution shift bias
+        log_prob_shifted = torch.cat([torch.zeros_like(log_prob[:, :1]), log_prob[:, :-1]], dim=1)
+        old_log_prob_shifted = torch.cat([torch.zeros_like(old_log_prob[:, :1]), old_log_prob[:, :-1]], dim=1)
+        rho_pi = torch.cumsum(log_prob_shifted, dim=1)
+        rho_mu = torch.cumsum(old_log_prob_shifted, dim=1)
+        rho_diff = rho_pi.exp() - rho_mu.exp()
+        rho_diff_mean = verl_F.masked_mean(rho_diff, response_mask)
+        dist_shift = rho_diff * advantages * ratio
+        dist_shift_mean = verl_F.masked_mean(dist_shift, response_mask)
+        
+        gamma = 0.99
+        seq_len = advantages.size(1)
+        gamma_t = gamma ** torch.arange(seq_len - 1, -1, -1, device=advantages.device).unsqueeze(0)
+        dist_shift_mean_weighted = verl_F.masked_mean(dist_shift * gamma_t, response_mask)
+        
+        # ratio^2 and ratio adv^2 norms for diagnostics
+        E_ratio_sq = verl_F.masked_mean(ratio ** 2, response_mask)
+        E_ratio_adv_sq = verl_F.masked_mean((ratio * advantages) ** 2, response_mask)
     
     return {
-        "actor/pg_clip_mean": E_clipped_ratio_A.detach().item(),
-        "actor/pg_clip_norm": E_clipped_norm.detach().item(),
+        "actor/J_clip": E_clipped_J.detach().item(),
+        "actor/J_clip_norm": E_clipped_norm.detach().item(),
+        "actor/J_clip_ratio": E_clipped_ratio.detach().item(),
+        "actor/J_clip_norm_ratio": E_clipped_norm_ratio.detach().item(),
+        "actor/estimated_improvement": estimated_improvement.detach().item(),
         "actor/ratio_adv_corr": corr.detach().item(),
+        "actor/ratio_sq": E_ratio_sq.detach().item(),
+        "actor/ratio_adv_sq": E_ratio_adv_sq.detach().item(),
+        "dist_shift/rho_diff_mean": rho_diff_mean.detach().item(),
+        "dist_shift/dist_shift_mean": dist_shift_mean.detach().item(),
+        "dist_shift/dist_shift_mean_weighted": dist_shift_mean_weighted.detach().item(),
+        # "dist_shift/ratio_norm": E_ratio_norm.detach().item(),
+        # "dist_shift/adv_norm": E_adv_norm.detach().item(),
+        # "dist_shift/is_adv_norm": E_is_adv_norm.detach().item(),
+        # "dist_shift/is_adv_bound": is_adv_bound.detach().item(),
+        # "dist_shift/dist_shift_bound": dist_shift_bound.detach().item(),
     }
 
 
@@ -577,6 +619,7 @@ class DataParallelPPOActor(BasePPOActor):
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
+                
         self.actor_optimizer.zero_grad()
         
         # Compute off-policy metrics

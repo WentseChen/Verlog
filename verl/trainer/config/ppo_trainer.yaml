@@ -370,7 +370,7 @@ envs:
     max_image_history: 0
 
     # whether to add hints to the last observation when the agent seems to be stuck in a loop
-    hint4loop_state: False
+    hint4loop_state: True
 
   babyai_kwargs:
 
