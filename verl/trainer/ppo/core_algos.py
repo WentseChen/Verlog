@@ -316,11 +316,19 @@ def compute_gae_advantage_return(
             # lastgaelam = lastgaelam_ * response_mask[:, t] + (1 - response_mask[:, t]) * lastgaelam
             # advantages_reversed.append(lastgaelam * response_mask[:, t])
         
+        # off-policy metrics
+        delta_reversed = []
+        for t in reversed(range(gen_len)):
+            delta = token_level_rewards[:, t] + token_gamma * nextvalues - values[:, t]
+            delta_reversed.append(delta * response_mask[:, t])
+            nextvalues = values[:, t] * response_mask[:, t] + (1 - response_mask[:, t]) * nextvalues
+        
         advantages = torch.stack(advantages_reversed[::-1], dim=1)
+        deltas = torch.stack(delta_reversed[::-1], dim=1)
 
         returns = advantages + values
         advantages = verl_F.masked_whiten(advantages, response_mask)
-    return advantages, returns
+    return advantages, returns, deltas
 
 
 # NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.

@@ -46,7 +46,7 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def compute_off_policy_metrics(log_prob, old_log_prob, advantages, response_mask, clip_ratio_low, clip_ratio_high):
+def compute_off_policy_metrics(log_prob, old_log_prob, advantages, response_mask, clip_ratio_low, clip_ratio_high, deltas):
     """
     Compute PPO clipping-related metrics.
     
@@ -57,6 +57,7 @@ def compute_off_policy_metrics(log_prob, old_log_prob, advantages, response_mask
         response_mask: Mask for valid tokens (bsz, response_length)
         clip_ratio_low: Lower clipping ratio (ε_low)
         clip_ratio_high: Upper clipping ratio (ε_high)
+        deltas: TD errors (bsz, response_length)
     
     Returns:
         dict: Dictionary containing clipping metrics
@@ -107,26 +108,38 @@ def compute_off_policy_metrics(log_prob, old_log_prob, advantages, response_mask
         dist_shift_mean_weighted = verl_F.masked_mean(dist_shift * gamma_t, response_mask)
         
         # ratio^2 and ratio adv^2 norms for diagnostics
-        E_ratio_sq = verl_F.masked_mean(ratio ** 2, response_mask)
-        E_ratio_adv_sq = verl_F.masked_mean((ratio * advantages) ** 2, response_mask)
+        E_ratio_sq = verl_F.masked_mean(ratio_clipped ** 2, response_mask)
+        E_ratio_adv_sq = verl_F.masked_mean((ratio_clipped * advantages) ** 2, response_mask)
+        
+        # weighted td error for diagnostics
+        is_deltas = deltas * ratio
+        E_is_delta = verl_F.masked_mean(is_deltas, response_mask)
+        E_is_delta_sq = verl_F.masked_mean(is_deltas**2, response_mask)
+        std_is_delta = torch.sqrt(E_is_delta_sq - E_is_delta**2 + 1e-8)
+        
+        # weighted td error clipped for diagnostics
+        clipped_delta = torch.clamp(deltas, -0.5, 0.5)
+        is_deltas_clipped = clipped_delta * ratio_clipped
+        E_is_delta_clipped = verl_F.masked_mean(is_deltas_clipped, response_mask)
+        E_is_delta_clipped_sq = verl_F.masked_mean(is_deltas_clipped**2, response_mask)
+        std_is_delta_clipped = torch.sqrt(E_is_delta_clipped_sq - E_is_delta_clipped**2 + 1e-8)
     
     return {
-        "actor/J_clip": E_clipped_J.detach().item(),
-        "actor/J_clip_norm": E_clipped_norm.detach().item(),
-        "actor/J_clip_ratio": E_clipped_ratio.detach().item(),
-        "actor/J_clip_norm_ratio": E_clipped_norm_ratio.detach().item(),
+        "clipped_J/mean": E_clipped_J.detach().item(),
+        "clipped_J/norm": E_clipped_norm.detach().item(),
+        "clipped_J/mean_ratio": E_clipped_ratio.detach().item(),
+        "clipped_J/norm_ratio": E_clipped_norm_ratio.detach().item(),
         "actor/estimated_improvement": estimated_improvement.detach().item(),
-        "actor/ratio_adv_corr": corr.detach().item(),
-        "actor/ratio_sq": E_ratio_sq.detach().item(),
-        "actor/ratio_adv_sq": E_ratio_adv_sq.detach().item(),
-        "dist_shift/rho_diff_mean": rho_diff_mean.detach().item(),
-        "dist_shift/dist_shift_mean": dist_shift_mean.detach().item(),
-        "dist_shift/dist_shift_mean_weighted": dist_shift_mean_weighted.detach().item(),
-        # "dist_shift/ratio_norm": E_ratio_norm.detach().item(),
-        # "dist_shift/adv_norm": E_adv_norm.detach().item(),
-        # "dist_shift/is_adv_norm": E_is_adv_norm.detach().item(),
-        # "dist_shift/is_adv_bound": is_adv_bound.detach().item(),
-        # "dist_shift/dist_shift_bound": dist_shift_bound.detach().item(),
+        "var_ratio/ratio_adv_corr": corr.detach().item(),
+        "var_ratio/ratio_sq": E_ratio_sq.detach().item(),
+        "var_ratio/ratio_x_adv_sq": E_ratio_adv_sq.detach().item(),
+        "IS_delta/mean": E_is_delta.detach().item(),
+        "IS_delta/std": std_is_delta.detach().item(),
+        "IS_delta/clipped_mean": E_is_delta_clipped.detach().item(),
+        "IS_delta/clipped_std": std_is_delta_clipped.detach().item(),
+        "dist_shift/rho_diff": rho_diff_mean.detach().item(),
+        "dist_shift/mean": dist_shift_mean.detach().item(),
+        "dist_shift/weighted_mean": dist_shift_mean_weighted.detach().item(),
     }
 
 
@@ -477,6 +490,7 @@ class DataParallelPPOActor(BasePPOActor):
             "position_ids",
             "old_log_probs",
             "advantages",
+            "deltas",
         ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
@@ -602,7 +616,8 @@ class DataParallelPPOActor(BasePPOActor):
                         advantages=advantages,
                         response_mask=response_mask,
                         clip_ratio_low=clip_ratio_low,
-                        clip_ratio_high=clip_ratio_high
+                        clip_ratio_high=clip_ratio_high,
+                        deltas=model_inputs["deltas"],
                     )
 
                     micro_batch_metrics.update(

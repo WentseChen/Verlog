@@ -252,7 +252,7 @@ def compute_advantage(
         # Compute advantages and returns using Generalized Advantage Estimation (GAE)
         episode_idx = data.non_tensor_batch["env_idx"]
         episode_structure = get_episode_structure(episode_idx)
-        advantages, returns = core_algos.compute_gae_advantage_return(
+        advantages, returns, deltas = core_algos.compute_gae_advantage_return(
             token_level_rewards=data.batch["token_level_rewards"],
             values=data.batch["values"],
             response_mask=data.batch["response_mask"],
@@ -265,6 +265,7 @@ def compute_advantage(
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+        data.batch["deltas"] = deltas
         if config.get("use_pf_ppo", False):
             data = core_algos.compute_pf_ppo_reweight_data(
                 data,

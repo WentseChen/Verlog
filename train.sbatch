@@ -30,7 +30,7 @@ MINI_BATCH_SIZE=$((BATCH_SIZE))
 MICRO_BATCH_SIZE=8
 FORWARD_BATCH_SIZE=$((4 * MICRO_BATCH_SIZE))
 OFFLOAD=false
-PPO_EPOCHS=5
+PPO_EPOCHS=6
 
 export VLLM_USE_V1=1
 
@@ -80,7 +80,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=True \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=babyai \
-    envs.task=BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to \
+    envs.task=BabyAI-MixedTrainLocal-v0/open \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \

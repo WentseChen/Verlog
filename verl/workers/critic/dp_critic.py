@@ -88,14 +88,14 @@ def get_off_policy_metric(returns, vpreds, response_mask, values, cliprange_valu
         std_delta_clip = torch.sqrt(E_delta_clip_norm - E_delta_clip ** 2 + 1e-8)
         
         metrics = {
-            "critic/vf_clip_value": E_clip_value.item(),
-            "critic/vf_clip_norm": E_clip_norm.item(),
-            "critic/vf_clip_value_ratio": clip_value_ratio.item(),
-            "critic/vf_clip_norm_ratio": clip_norm_ratio.item(),
-            "critic/delta_mean": E_delta.item(),
-            "critic/delta_std": std_delta.item(),
-            "critic/delta_clip_mean": E_delta_clip.item(),
-            "critic/delta_clip_std": std_delta_clip.item(),
+            "clipped_v/mean": E_clip_value.item(),
+            "clipped_v/norm": E_clip_norm.item(),
+            "clipped_v/mean_ratio": clip_value_ratio.item(),
+            "clipped_v/norm_ratio": clip_norm_ratio.item(),
+            "IS_delta/delta_mean": E_delta.item(),
+            "IS_delta/delta_std": std_delta.item(),
+            "IS_delta/delta_clipped_mean": E_delta_clip.item(),
+            "IS_delta/delta_clipped_std": std_delta_clip.item(),
         }
         
     return metrics
@@ -303,7 +303,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                         vpreds=vpreds,
                         response_mask=response_mask,
                         values=values,
-                        cliprange_value=self.config.cliprange_value
+                        cliprange_value=self.config.cliprange_value,
                     )
                     
                     if self.config.use_dynamic_bsz:
