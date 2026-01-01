@@ -107,6 +107,8 @@ class ToolAgentLoop(AgentLoopBase):
         cls.system_prompt = tokenizer.apply_chat_template(
             [{}], add_generation_prompt=False, tokenize=True, **cls.apply_chat_template_kwargs
         )
+        
+        cls.skip_loop_rate = config.actor_rollout_ref.rollout.skip_loop_rate
 
     @rollout_trace_op
     async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool, **kwargs) -> List[AgentLoopOutput]:
@@ -171,6 +173,10 @@ class ToolAgentLoop(AgentLoopBase):
             
             if done and is_val:
                 break
+            
+            if self.skip_loop_rate < np.random.rand():
+                if info["metrics"]["behavior/loop_rate"] > 0.:
+                    continue
             
             turn_data = AgentLoopOutput(
                 prompt_ids=prompt_ids,

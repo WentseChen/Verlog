@@ -16,6 +16,9 @@ top_k: -1
 # Top-p sampling parameter. Default 1.0.
 top_p: 1
 
+# the probability to skip one looped (s,a) pair in agent rollout
+skip_loop_rate: 0.0
+
 # typically the same as data max prompt length
 # same as data.max_prompt_length if it exists
 prompt_length: ${oc.select:data.max_prompt_length,512}

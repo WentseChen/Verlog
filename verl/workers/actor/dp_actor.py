@@ -511,8 +511,12 @@ class DataParallelPPOActor(BasePPOActor):
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
 
         metrics = {}
-        for _ in range(self.config.ppo_epochs):
+        last_mb_metrics = {}
+        
+        for epoch_idx in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
+                is_last_mini_batch = (batch_idx == len(mini_batches) - 1) and (epoch_idx == self.config.ppo_epochs - 1)
+                
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
@@ -630,15 +634,27 @@ class DataParallelPPOActor(BasePPOActor):
                         }
                     )
                     append_to_dict(metrics, micro_batch_metrics)
+                    
+                    # Track last mini-batch metrics separately
+                    if is_last_mini_batch:
+                        append_to_dict(last_mb_metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
+                
+                # Track grad_norm for last mini-batch
+                if is_last_mini_batch:
+                    append_to_dict(last_mb_metrics, mini_batch_metrics)
                 
         self.actor_optimizer.zero_grad()
         
         # Compute off-policy metrics
         off_policy_metrics = compute_off_policy_metrics2(metrics)
         metrics.update(off_policy_metrics)
+        
+        # Add last mini-batch metrics with "(last_mb)" suffix
+        for key, value in last_mb_metrics.items():
+            metrics[f"{key}_(last_mb)"] = value
         
         return metrics

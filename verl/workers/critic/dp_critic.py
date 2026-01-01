@@ -255,6 +255,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         # make sure we are in training mode
         self.critic_module.train()
         metrics = {}
+        last_mb_metrics = {}
 
         select_keys = ["input_ids", "responses", "response_mask", "attention_mask", "position_ids", "values", "returns"]
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
@@ -266,8 +267,11 @@ class DataParallelPPOCritic(BasePPOCritic):
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(self.config.ppo_mini_batch_size)
 
-        for _ in range(self.config.ppo_epochs):
+        for epoch_idx in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
+                
+                is_last_mini_batch = (batch_idx == len(mini_batches) - 1) and (epoch_idx == self.config.ppo_epochs - 1)
+                
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
@@ -328,9 +332,20 @@ class DataParallelPPOCritic(BasePPOCritic):
                     micro_batch_metrics.update(off_policy_metrics)
 
                     append_to_dict(metrics, micro_batch_metrics)
+                    
+                    if is_last_mini_batch:
+                        append_to_dict(last_mb_metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"critic/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
+                
+                if is_last_mini_batch:
+                    append_to_dict(last_mb_metrics, mini_batch_metrics)
+        
+        # Add last mini-batch metrics with "(last_mb)" suffix
+        for key, value in last_mb_metrics.items():
+            metrics[f"{key}_(last_mb)"] = value
+                
         self.critic_optimizer.zero_grad()
         return metrics

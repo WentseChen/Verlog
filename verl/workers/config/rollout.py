@@ -123,6 +123,7 @@ class RolloutConfig(BaseConfig):
     tensor_model_parallel_size: int = 2
     pipeline_model_parallel_size: int = 1
     max_num_batched_tokens: int = 8192
+    skip_loop_rate: float = 0.0
 
     # TODO: enable train_kwargs
     # train_sampling_config: SamplingConfig = field(default_factory=SamplingConfig)
