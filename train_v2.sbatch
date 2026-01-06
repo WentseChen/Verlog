@@ -6,9 +6,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
-#SBATCH --partition=gpuA100x4
+#SBATCH --partition=gpuA40x4
 #SBATCH --account=bfoz-delta-gpu
-#SBATCH --time=47:59:59
+#SBATCH --time=23:59:59
 #SBATCH --gpus-per-node=4
 
 source /u/aseo/anaconda3/bin/activate 
@@ -71,7 +71,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup_batch_repeat_times=40 \
     trainer.critic_warmup_batch_divide_ratio=4 \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name='one' \
+    trainer.project_name='zero' \
     trainer.experiment_name='ppo_epoch' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \

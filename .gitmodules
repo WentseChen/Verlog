@@ -1,0 +1,3 @@
+[submodule "third_party/unscripted_llms"]
+	path = third_party/unscripted_llms
+	url = https://github.com/cpulling/unscripted_llms.git

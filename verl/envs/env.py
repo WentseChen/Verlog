@@ -1,52 +1,117 @@
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+UNSCRIPTED_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "unscripted_llms"
+if UNSCRIPTED_ROOT.exists() and str(UNSCRIPTED_ROOT) not in sys.path:
+    sys.path.insert(0, str(UNSCRIPTED_ROOT))
+
+from src.wrappers.gym_llm_wrapper import AdmissionsLLMGymEnv
+
+
 class Env:
-    def __init__(self, env_name, config, env, captioner):
-        self.env_name = env_name
+    def __init__(self, env_name, config, env=None, captioner=None):
+        self.env_name  = env_name
         self.config = config
-        self.env = env
-        self.captioner = captioner
-        self.image = None
+        self.env = env if env is not None else self._build_env()
         self.last_msg = None
         self.last_info = None
-        
+
+    def _build_env(self):
+        game_config = None
+        if hasattr(self.config, "envs"):
+            game_config = getattr(self.config.envs, "game_config", None)
+        if not game_config:
+            game_config = {
+                "professor_ids": ["prof_1", "prof_2", "prof_3"],
+                "students_per_batch": 10,
+                "num_rounds": 1,
+                "feature_dim": 5,
+                "vote_threshold": 0.5,
+                "seed": None,
+            }
+        return AdmissionsLLMGymEnv(game_config=game_config)
+
+    def _build_messages(self, obs_text: str, agent_id: str | None):
+        system_prompt = None
+        try:
+            prof_config = self.env._get_professor_config(agent_id)
+            system_prompt = self.env.prompt_builder.build_system_prompt(
+                professor_id=agent_id,
+                game=self.env.game,
+                personality=prof_config.personality,
+                personality_prompts=self.env.personality_prompts,
+                runner_mode="async",
+                token_budget=self.env.total_token_budget,
+                shared_token_budget=True,
+            )
+        except Exception:
+            system_prompt = None
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": obs_text})
+        return messages
+
+    def _extract_agent_id_from_action(self, action) -> str | None:
+        if action is None:
+            return None
+        if isinstance(action, list):
+            for msg in action:
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("role") == "system":
+                    agent_id = self._extract_agent_id_from_text(msg.get("content", ""))
+                    if agent_id:
+                        return agent_id
+            return self._extract_agent_id_from_text(" ".join(str(item) for item in action))
+        if isinstance(action, dict):
+            if "messages" in action and isinstance(action["messages"], list):
+                return self._extract_agent_id_from_action(action["messages"])
+            if "system" in action and isinstance(action["system"], str):
+                return self._extract_agent_id_from_text(action["system"])
+        if isinstance(action, str):
+            return self._extract_agent_id_from_text(action)
+        return None
+
+    def _extract_agent_id_from_text(self, text: str) -> str | None:
+        match = re.search(r"You are Professor\s+([^,\s]+)", text, re.IGNORECASE)
+        if not match:
+            return None
+        return match.group(1)
+
     def get_last_obs(self):
         return self.last_msg, self.last_info
-    
+
     def step(self, action):
-        full_action, executed_action, is_valid, metrics = self.env.extract_action(action)
-        env_obs, reward, terminated, truncated, info = self.env.step(executed_action, is_valid)
-        self.image = env_obs.get("image", None)
-        instructions = env_obs["mission"] if self.env_name == "babyai" else None
-        inst_prompt = self.env.get_instruction_prompt(instructions=instructions, info=info)
-        self.captioner.prompt_builder.update_instruction_prompt(inst_prompt)
-        self.captioner.update_action(full_action, executed_action)
-        info["metrics"] = metrics
-        obs = self.captioner.get_obs(env_obs)
-        # Auto-reset if episode ends
-        if terminated or truncated:
-            obs, last_info = self._reset_internal()
-        self.last_msg = obs
-        self.last_info = info if not (terminated or truncated) else last_info
-        
-        return obs, reward, terminated, truncated, info
-    
-    def reset(self):
-        obs, info = self._reset_internal()
-        self.last_msg = obs
+        observations, reward, terminated, truncated, infos = self.env.step(action)
+        info = dict(next(iter(infos.values()))) if infos else {}
+        agent_id = self._extract_agent_id_from_action(action)
+        obs_text = observations.get(agent_id, {}).get("prompt", "")
+        info["agent_id"] = agent_id
+        info["raw_infos"] = infos
+        messages = self._build_messages(obs_text, agent_id)
+        self.last_msg = messages
         self.last_info = info
-        return obs, info
-    
-    def _reset_internal(self):
-        self.captioner.reset()
-        env_obs, info = self.env.reset()
-        self.image = env_obs.get("image", None)
-        instructions = env_obs["mission"] if self.env_name == "babyai" else None
-        inst_prompt = self.env.get_instruction_prompt(instructions=instructions)
-        self.captioner.prompt_builder.update_instruction_prompt(inst_prompt)
-        obs = self.captioner.get_obs(env_obs)
-        return obs, info
-    
+        return messages, reward, terminated, truncated, info
+
+    def reset(self):
+        observations, infos = self.env.reset()
+        agent_id = self.env.possible_agents[0] if self.env.possible_agents else None
+        obs_text = observations.get(agent_id, {}).get("prompt", "")
+        info = dict(infos.get(agent_id, {}))
+        info["agent_id"] = agent_id
+        info["raw_infos"] = infos
+        messages = self._build_messages(obs_text, agent_id)
+        self.last_msg = messages
+        self.last_info = info
+        return messages, info
+
     def render(self):
-        return self.image
-    
+        return None
+
     def close(self):
         self.env.close()
