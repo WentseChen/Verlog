@@ -128,3 +128,5 @@ outputs
 .history
 
 *.whl*
+
+/trajectory*

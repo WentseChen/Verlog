@@ -16,6 +16,7 @@ import copy
 import json
 import logging
 import os
+from datetime import datetime
 from enum import Enum
 from typing import Any, Optional, List
 from uuid import uuid4
@@ -124,10 +125,12 @@ class ToolAgentLoop(AgentLoopBase):
         if cls.interaction_config_file:
             cls.interaction_map: dict[str, BaseInteraction] = cls._initialize_interactions(cls.interaction_config_file)
 
-    @rollout_trace_op
-    async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool, **kwargs) -> List[AgentLoopOutput]:
+        cls.reset_rate = config.envs.reset_rate
 
-        if is_val:
+    @rollout_trace_op
+    async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool, is_log: bool = True, **kwargs) -> List[AgentLoopOutput]:
+
+        if is_val or np.random.rand() < self.__class__.reset_rate:
             messages, info = env.reset()
         else:
             messages, info = env.get_last_obs()
@@ -149,6 +152,10 @@ class ToolAgentLoop(AgentLoopBase):
         outputs = []
         num_turns = 0
         reward = 0.0
+        
+        # # Initialize trajectory logging if needed
+        # trajectory = [] if (is_val and is_log) else None
+        
         while True:
             
             with simple_timer("generate_sequences", metrics):
@@ -181,6 +188,22 @@ class ToolAgentLoop(AgentLoopBase):
             
             messages, reward, terminated, truncated, info = env.step(actions)
             done = np.logical_or(terminated, truncated)
+            
+            # # Log trajectory if needed
+            # if trajectory is not None:
+            #     # Decode prompt for logging
+            #     prompt_text = await self.loop.run_in_executor(
+            #         None,
+            #         lambda: self.tokenizer.decode(prompt_ids, skip_special_tokens=False)
+            #     )
+                
+            #     turn_log = {
+            #         "turn": num_turns,
+            #         "prompt": prompt_text,
+            #         "response": actions,
+            #         "reward": float(reward) if isinstance(reward, (int, float, np.number)) else reward,
+            #     }
+            #     trajectory.append(turn_log)
             
             if done and is_val:
                 break
@@ -231,6 +254,26 @@ class ToolAgentLoop(AgentLoopBase):
             env_idx=env_idx,
         )
         outputs.append(turn_data)
+        
+        # # Save trajectory to file if logging is enabled
+        # if trajectory is not None and len(trajectory) > 0:
+        #     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        #     log_dir = os.path.join(os.getcwd(), "trajectory_logs2")
+        #     os.makedirs(log_dir, exist_ok=True)
+        #     log_file = os.path.join(log_dir, f"{timestamp}.json")
+            
+        #     trajectory_data = {
+        #         "env_idx": env_idx,
+        #         "request_id": request_id,
+        #         "total_turns": num_turns,
+        #         "final_reward": float(reward) if isinstance(reward, (int, float, np.number)) else reward,
+        #         "trajectory": trajectory
+        #     }
+            
+        #     with open(log_file, 'w') as f:
+        #         json.dump(trajectory_data, f, indent=2)
+            
+        #     logger.info(f"Saved trajectory log to {log_file}")
         
         return outputs
 

@@ -214,7 +214,7 @@ class ResourcePoolManager:
             )
 
 
-def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
+def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl", global_steps=0, rewards=0.0):
     """Apply KL penalty to the token-level rewards.
 
     This function computes the KL divergence between the reference policy and current policy,
@@ -240,7 +240,9 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
         data.batch["old_log_probs"], data.batch["ref_log_prob"], kl_penalty=kl_penalty
     )  # (batch_size, response_length)
     kld = kld * response_mask
-    beta = kl_ctrl.value
+    # beta = kl_ctrl.value
+    kld_mean = masked_mean(kld, mask=response_mask)  # average over sequence
+    beta = np.clip(1 / max(kld_mean, 1e-4) / 30000, a_min=0.0, a_max=0.003)
 
     token_level_rewards = token_level_scores - beta * kld
 
@@ -248,7 +250,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     current_kl = torch.mean(current_kl, dim=0).item()
 
     # according to https://github.com/huggingface/trl/blob/951ca1841f29114b969b57b26c7d3e80a39f75a0/trl/trainer/ppo_trainer.py#L837
-    kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
+    kl_ctrl.update(current_kl=current_kl, n_steps=global_steps, rewards=rewards)
     data.batch["token_level_rewards"] = token_level_rewards
 
     metrics = {"actor/reward_kl_penalty": current_kl, "actor/reward_kl_penalty_coeff": beta}
@@ -311,7 +313,7 @@ def compute_advantage(
         # Compute advantages and returns using Generalized Advantage Estimation (GAE)
         episode_idx = data.non_tensor_batch["env_idx"]
         episode_structure = get_episode_structure(episode_idx)
-        advantages, returns = core_algos.compute_gae_advantage_return(
+        advantages, returns, deltas = core_algos.compute_gae_advantage_return(
             token_level_rewards=data.batch["token_level_rewards"],
             values=data.batch["values"],
             response_mask=data.batch["response_mask"],
@@ -324,6 +326,7 @@ def compute_advantage(
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+        data.batch["deltas"] = deltas
         if config.get("use_pf_ppo", False):
             data = core_algos.compute_pf_ppo_reweight_data(
                 data,
@@ -689,8 +692,15 @@ class RayPPOTrainer:
             unique_envs = np.unique(env_idx)
             last_positions = [np.where(env_idx == uni_env)[0][-1] for uni_env in unique_envs]
             last_positions = np.array(last_positions)
-            val_rewards = test_output_gen_batch_padded.batch["rewards"][last_positions]
+            # val_rewards = test_output_gen_batch_padded.batch["rewards"][last_positions]
             val_traj_len = test_output_gen_batch_padded.non_tensor_batch['__num_turns__'][last_positions] + 1
+            
+            accumulated_rewards = []
+            for uni_env in unique_envs:
+                env_positions = np.where(env_idx == uni_env)[0]
+                traj_rewards = test_output_gen_batch_padded.batch["rewards"][env_positions]
+                accumulated_rewards.append(torch.sum(traj_rewards).item())
+            val_rewards = np.array(accumulated_rewards)
             
             metric_dict = dict()
             metric_dict["mean_rewards"] = val_rewards.mean().item()
@@ -1267,41 +1277,13 @@ class RayPPOTrainer:
                         # compute reference log_prob
                         with marked_timer("ref", timing_raw, color="olive"):
                             
-                            show_obs_prob = self.config.trainer.show_ref_obs_prob
-                            batch.meta_info["return_all_logits"] = show_obs_prob
-                            
                             if not self.ref_in_actor:
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             
-                            if show_obs_prob:
-                                all_ref_log_prob = ref_log_prob.batch["ref_log_prob"].clone()
-                                response_length = batch.batch["response_mask"].size(1)
-                                ref_log_prob.batch["ref_log_prob"] = ref_log_prob.batch["ref_log_prob"][:, -response_length - 1 : -1]
-                            
                             batch = batch.union(ref_log_prob)
                             
-                            if show_obs_prob:
-                                lhs_txt = self.tokenizer("<|im_end|>")['input_ids'][0] # 5 = "\n<|im_start|>user\nCurrent"
-                                lhs_idx = find_second_last_in_batch(batch.batch["prompts"], lhs_txt) + 5
-                                rhs_txt = self.tokenizer("What will you do next?")['input_ids']
-                                rhs_idx = find_query_in_batch(rhs_txt, batch.batch["prompts"])
-                                num_turns = torch.sum(batch.batch["prompts"] == lhs_txt, dim=1) // 2
-                                obs_log_mask = num_turns > 1
-                                
-                                mean_log_prob = torch.empty(len(lhs_idx), device=all_ref_log_prob.device)
-                                mean_prob = torch.empty(len(lhs_idx), device=all_ref_log_prob.device)
-                                gt_half = torch.empty(len(lhs_idx), device=all_ref_log_prob.device)
-                                for i in range(len(all_ref_log_prob)):
-                                    mean_log_prob[i] = all_ref_log_prob[i, lhs_idx[i]+1 : rhs_idx[i]].mean()
-                                    mean_prob[i] = (all_ref_log_prob[i, lhs_idx[i]+1 : rhs_idx[i]].exp()).mean()
-                                    gt_half[i] = (all_ref_log_prob[i, lhs_idx[i]+1 : rhs_idx[i]].exp() > 0.5).float().mean()
-                                
-                                metrics["ref/obs_log_prob_mean"] = (mean_log_prob[obs_log_mask].mean().item() if obs_log_mask.sum() > 0 else 0.0)
-                                metrics["ref/obs_prob_mean"] = (mean_prob[obs_log_mask].mean().item() if obs_log_mask.sum() > 0 else 0.0)
-                                metrics["ref/gt_half"] = (gt_half[obs_log_mask].mean().item() if obs_log_mask.sum() > 0 else 0.0)
-
                     # compute values
                     if self.use_critic:
                         with marked_timer("values", timing_raw, color="cyan"):
@@ -1327,8 +1309,10 @@ class RayPPOTrainer:
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
+                            masked_reward = batch.batch["token_level_scores"] * batch.batch["response_mask"]
+                            masked_mean_reward = masked_reward.sum() / batch.batch["response_mask"].sum()
                             batch, kl_metrics = apply_kl_penalty(
-                                batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+                                batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty, global_steps=self.global_steps, rewards=masked_mean_reward,
                             )
                             metrics.update(kl_metrics)
                         else:

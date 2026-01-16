@@ -21,6 +21,7 @@ import logging
 import os
 
 import torch
+import numpy as np
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.tensor import DTensor
@@ -43,6 +44,130 @@ __all__ = ["DataParallelPPOActor"]
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def compute_off_policy_metrics(log_prob, old_log_prob, advantages, response_mask, clip_ratio_low, clip_ratio_high, deltas):
+    """
+    Compute PPO clipping-related metrics.
+    
+    Args:
+        log_prob: Current policy log probabilities (bsz, response_length)
+        old_log_prob: Old policy log probabilities (bsz, response_length)
+        advantages: Advantage estimates (bsz, response_length)
+        response_mask: Mask for valid tokens (bsz, response_length)
+        clip_ratio_low: Lower clipping ratio (ε_low)
+        clip_ratio_high: Upper clipping ratio (ε_high)
+        deltas: TD errors (bsz, response_length)
+    
+    Returns:
+        dict: Dictionary containing clipping metrics
+    """
+    with torch.no_grad():
+        ratio = torch.exp(log_prob - old_log_prob)
+        ratio_clipped = torch.clamp(ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+        pg_losses1 = -advantages * ratio
+        pg_losses2 = -advantages * ratio_clipped
+        clipped_indicator = (pg_losses2 > pg_losses1).float()
+        clipped_J = clipped_indicator * ratio * advantages
+        E_clipped_J = verl_F.masked_mean(clipped_J, response_mask)
+        clipped_norm = torch.norm(clipped_J, p=2)
+        E_clipped_norm = verl_F.masked_mean(clipped_norm, response_mask)
+        
+        E_J = verl_F.masked_mean(-pg_losses1, response_mask)
+        J_norm = torch.norm(pg_losses1, p=2)
+        E_J_norm = verl_F.masked_mean(J_norm, response_mask)
+        
+        E_clipped_ratio = E_clipped_J / (E_J + 1e-8)
+        E_clipped_norm_ratio = E_clipped_norm / (E_J_norm + 1e-8)
+        
+        J_PPO = torch.minimum(pg_losses1, pg_losses2)
+        estimated_improvement = -verl_F.masked_mean(J_PPO, response_mask)
+        
+        # Compute ratio-advantage correlation
+        masked_ratio = ratio * response_mask
+        masked_advantages = advantages * response_mask
+        numerator = torch.sum((masked_ratio - 1.0) * masked_advantages)
+        denominator = torch.sqrt(
+            torch.sum((masked_ratio - 1.0) ** 2) * torch.sum(masked_advantages**2) + 1e-8
+        )
+        corr = numerator / (denominator + 1e-8)
+        
+        # distribution shift bias
+        log_prob_shifted = torch.cat([torch.zeros_like(log_prob[:, :1]), log_prob[:, :-1]], dim=1)
+        old_log_prob_shifted = torch.cat([torch.zeros_like(old_log_prob[:, :1]), old_log_prob[:, :-1]], dim=1)
+        rho_pi = torch.cumsum(log_prob_shifted, dim=1)
+        rho_mu = torch.cumsum(old_log_prob_shifted, dim=1)
+        rho_diff = rho_pi.exp() - rho_mu.exp()
+        rho_diff_mean = verl_F.masked_mean(rho_diff, response_mask)
+        dist_shift = rho_diff * advantages * ratio
+        dist_shift_mean = verl_F.masked_mean(dist_shift, response_mask)
+        
+        gamma = 0.99
+        seq_len = advantages.size(1)
+        gamma_t = gamma ** torch.arange(seq_len - 1, -1, -1, device=advantages.device).unsqueeze(0)
+        dist_shift_mean_weighted = verl_F.masked_mean(dist_shift * gamma_t, response_mask)
+        
+        # ratio^2 and ratio adv^2 norms for diagnostics
+        E_ratio_sq = verl_F.masked_mean(ratio_clipped ** 2, response_mask)
+        E_ratio_adv_sq = verl_F.masked_mean((ratio_clipped * advantages) ** 2, response_mask)
+        
+        # weighted td error for diagnostics
+        is_deltas = deltas * ratio
+        E_is_delta = verl_F.masked_mean(is_deltas, response_mask)
+        E_is_delta_sq = verl_F.masked_mean(is_deltas**2, response_mask)
+        std_is_delta = torch.sqrt(E_is_delta_sq - E_is_delta**2 + 1e-8)
+        
+        # weighted td error clipped for diagnostics
+        clipped_delta = torch.clamp(deltas, -0.5, 0.5)
+        is_deltas_clipped = clipped_delta * ratio_clipped
+        E_is_delta_clipped = verl_F.masked_mean(is_deltas_clipped, response_mask)
+        E_is_delta_clipped_sq = verl_F.masked_mean(is_deltas_clipped**2, response_mask)
+        std_is_delta_clipped = torch.sqrt(E_is_delta_clipped_sq - E_is_delta_clipped**2 + 1e-8)
+    
+    return {
+        "actor/J_clip": E_clipped_J.detach().item(),
+        "actor/J_clip_norm": E_clipped_norm.detach().item(),
+        "actor/J_clip_ratio": E_clipped_ratio.detach().item(),
+        "actor/J_clip_norm_ratio": E_clipped_norm_ratio.detach().item(),
+        "actor/estimated_improvement": estimated_improvement.detach().item(),
+        "actor/ratio_adv_corr": corr.detach().item(),
+        "actor/ratio_sq": E_ratio_sq.detach().item(),
+        "actor/ratio_adv_sq": E_ratio_adv_sq.detach().item(),
+        "actor/IS_delta": E_is_delta.detach().item(),
+        "actor/IS_delta_std": std_is_delta.detach().item(),
+        "actor/IS_delta_clipped": E_is_delta_clipped.detach().item(),
+        "actor/IS_delta_clipped_std": std_is_delta_clipped.detach().item(),
+        "dist_shift/rho_diff_mean": rho_diff_mean.detach().item(),
+        "dist_shift/dist_shift_mean": dist_shift_mean.detach().item(),
+        "dist_shift/dist_shift_mean_weighted": dist_shift_mean_weighted.detach().item(),
+        # "dist_shift/ratio_norm": E_ratio_norm.detach().item(),
+        # "dist_shift/adv_norm": E_adv_norm.detach().item(),
+        # "dist_shift/is_adv_norm": E_is_adv_norm.detach().item(),
+        # "dist_shift/is_adv_bound": is_adv_bound.detach().item(),
+        # "dist_shift/dist_shift_bound": dist_shift_bound.detach().item(),
+    }
+
+
+def compute_off_policy_metrics2(metrics):
+    """
+    Compute off-policy metrics such as PPO KL variance.
+    
+    Args:
+        metrics: Dictionary containing accumulated metrics
+    
+    Returns:
+        dict: Dictionary containing off-policy metrics
+    """
+    off_policy_metrics = {}
+    
+    if "actor/ppo_kl" in metrics:
+        ppo_kl = metrics["actor/ppo_kl"]
+        if isinstance(ppo_kl, list):
+            ppo_kl = np.array(ppo_kl)
+            ppo_kl_var = np.var(ppo_kl)
+            off_policy_metrics["actor/ppo_kl_var"] = [ppo_kl_var]
+    
+    return off_policy_metrics
 
 
 class DataParallelPPOActor(BasePPOActor):
@@ -373,6 +498,7 @@ class DataParallelPPOActor(BasePPOActor):
             "position_ids",
             "old_log_probs",
             "advantages",
+            "deltas",
         ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
@@ -488,6 +614,19 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         loss = policy_loss * loss_scale_factor
                     loss.backward()
+                    
+                    clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else self.config.clip_ratio
+                    clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else self.config.clip_ratio
+                    
+                    off_policy_metrics = compute_off_policy_metrics(
+                        log_prob=log_prob,
+                        old_log_prob=old_log_prob,
+                        advantages=advantages,
+                        response_mask=response_mask,
+                        clip_ratio_low=clip_ratio_low,
+                        clip_ratio_high=clip_ratio_high,
+                        deltas=model_inputs["deltas"],
+                    )
 
                     micro_batch_metrics.update(
                         {
@@ -495,6 +634,7 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/pg_clipfrac": pg_clipfrac.detach().item(),
                             "actor/ppo_kl": ppo_kl.detach().item(),
                             "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                            **off_policy_metrics,
                         }
                     )
                     append_to_dict(metrics, micro_batch_metrics)
@@ -503,4 +643,9 @@ class DataParallelPPOActor(BasePPOActor):
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
+
+        # Compute off-policy metrics
+        off_policy_metrics = compute_off_policy_metrics2(metrics)
+        metrics.update(off_policy_metrics)
+        
         return metrics

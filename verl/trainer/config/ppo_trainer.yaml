@@ -103,6 +103,15 @@ algorithm:
     # Target KL divergence (used for adaptive controller)
     target_kl: 0.1
 
+    # total steps for linear decay KL controller
+    total_steps: 300
+
+    # initial KL coefficient for linear decay KL controller
+    init_kl_coef: 0.001
+
+    # final KL coefficient for linear decay KL controller
+    final_kl_coef: 0.0005
+
   # Whether to enable preference feedback PPO
   use_pf_ppo: False
 
@@ -356,6 +365,9 @@ envs:
 
   # If Ture, all rewards (except format penalty) are either 0 or 1
   binary_reward: True
+
+  # rate to reset environment during rollout
+  reset_rate: 0.1
 
   captioner:
 

@@ -186,6 +186,23 @@ class FixedKLController:
         """
         pass
 
+class LinearDecayKLController:
+    """Linear Decay KL controller."""
+
+    def __init__(self, init_kl_coef, final_kl_coef, total_steps):
+        self.init_kl_coef = init_kl_coef
+        self.final_kl_coef = final_kl_coef
+        self.total_steps = total_steps
+        self.current_step = 0
+        self.value = init_kl_coef
+
+    def update(self, current_kl, n_steps, rewards=None):
+        
+        if self.final_kl_coef < 0:
+            self.value = np.clip(1 / max(rewards, 1e-5) / 10, a_min=1e-5, a_max=self.init_kl_coef)
+        else:
+            self.value = np.clip(0.567 / self.final_kl_coef * np.exp(-self.current_step / 30), a_min=0.0, a_max=self.init_kl_coef)
+
 
 def get_kl_controller(kl_ctrl):
     """Factory function to create appropriate KL controller based on configuration.
@@ -202,6 +219,12 @@ def get_kl_controller(kl_ctrl):
     """
     if kl_ctrl.type == "fixed":
         return FixedKLController(kl_coef=kl_ctrl.kl_coef)
+    elif kl_ctrl.type == "linear_decay":
+        return LinearDecayKLController(
+            init_kl_coef=kl_ctrl.init_kl_coef,
+            final_kl_coef=kl_ctrl.final_kl_coef,
+            total_steps=kl_ctrl.total_steps,
+        )
     elif kl_ctrl.type == "adaptive":
         assert kl_ctrl.horizon > 0, f"horizon must be larger than 0. Got {kl_ctrl.horizon}"
         return AdaptiveKLController(init_kl_coef=kl_ctrl.kl_coef, target_kl=kl_ctrl.target_kl, horizon=kl_ctrl.horizon)
@@ -242,52 +265,24 @@ def compute_gae_advantage_return(
             shape: (bs, response_length)
 
     """
-    # Convert all tensor inputs to float32
-    token_level_rewards_fp32 = token_level_rewards.float()
-    values_fp32 = values.float()
-    response_mask_fp32 = response_mask.float()
-    dones_fp32 = dones.float()
-    step_gamma_fp32 = float(step_gamma)
-    step_lam_fp32 = float(step_lam)
-    token_gamma_fp32 = float(token_gamma)
-    token_lam_fp32 = float(token_lam)
     
-    # Call the original function with float32 inputs
-    advantages_fp32, returns_fp32 = compute_gae_advantage_return_core(
-        token_level_rewards=token_level_rewards_fp32,
-        values=values_fp32,
-        response_mask=response_mask_fp32,
-        step_gamma=step_gamma_fp32,
-        step_lam=step_lam_fp32,
-        token_gamma=token_gamma_fp32,
-        token_lam=token_lam_fp32,
-        dones=dones_fp32,
-        episode_structure=episode_structure,
-    )
+    # assume token level gamma and lam are 1.0 so that we can use heirarchical GAE computation
+    assert token_gamma == 1.0 and token_lam == 1.0, "Currently only support token_gamma=1.0 and token_lam=1.0"
     
-    return advantages_fp32, returns_fp32
-
-def compute_gae_advantage_return_core(
-    token_level_rewards: torch.Tensor,
-    values: torch.Tensor,
-    response_mask: torch.Tensor,
-    dones: torch.Tensor,
-    episode_structure: List[List[int]],
-    token_gamma: float = 1.0,
-    step_gamma: float = 1.0,
-    token_lam: float = 1.0,
-    step_lam: float = 1.0,
-):
-
     with torch.no_grad():
         
-        # turn level
+        # get turn level rewards and values
         turn_values = values[:,0].clone()                   # [B]
         turn_rewards = token_level_rewards.clone().sum(-1)  # [B]
-
+        # intermediate variables
         turn_advantages = torch.zeros_like(turn_values)
         turn_returns = torch.zeros_like(turn_values)
+        
+        # turn level nextvalues and lastgaelam for token level GAE computation
+        nextvalues = torch.zeros_like(turn_values)
+        lastgaelam = torch.zeros_like(turn_values)
 
+        # for each episode, compute turn-level GAE in backward way
         for ep_indices in episode_structure:
             
             ep_rewards = turn_rewards[ep_indices].clone()
@@ -313,9 +308,7 @@ def compute_gae_advantage_return_core(
             turn_advantages[ep_indices] = ep_advantages
             turn_returns[ep_indices] = ep_returns
             
-        # put turn-level results back to each turn
-        nextvalues = torch.zeros_like(turn_values) # (bs,)
-        lastgaelam = torch.zeros_like(turn_values) # (bs,)
+        # store turn-level results back to each turn
         for ep_indices in episode_structure:
             
             ep_dones = dones[ep_indices].clone()
@@ -329,28 +322,36 @@ def compute_gae_advantage_return_core(
             next_ep_gaelam[:-1] *= (1 - ep_dones[:-1] * 1.0)
             lastgaelam[ep_indices] = next_ep_gaelam * step_gamma * step_lam
     
-        # token level
+        # token level GAE
         advantages_reversed = []
         gen_len = token_level_rewards.shape[-1]
 
         for t in reversed(range(gen_len)):
             
+            # Method 1: concise version
             token_adv = token_level_rewards[:, t:].sum(-1) + nextvalues - values[:, t] + lastgaelam 
             advantages_reversed.append(token_adv)
 
+            # Method 2: classic version
             # delta = token_level_rewards[:, t] + token_gamma * nextvalues - values[:, t]
             # lastgaelam_ = delta + token_gamma * token_lam * lastgaelam
             # nextvalues = values[:, t] * response_mask[:, t] + (1 - response_mask[:, t]) * nextvalues
             # lastgaelam = lastgaelam_ * response_mask[:, t] + (1 - response_mask[:, t]) * lastgaelam
             # advantages_reversed.append(lastgaelam * response_mask[:, t])
-            
-        advantages = torch.stack(advantages_reversed[::-1], dim=1)
         
+        # off-policy metrics
+        delta_reversed = []
+        for t in reversed(range(gen_len)):
+            delta = token_level_rewards[:, t] + token_gamma * nextvalues - values[:, t]
+            delta_reversed.append(delta * response_mask[:, t])
+            nextvalues = values[:, t] * response_mask[:, t] + (1 - response_mask[:, t]) * nextvalues
+        
+        advantages = torch.stack(advantages_reversed[::-1], dim=1)
+        deltas = torch.stack(delta_reversed[::-1], dim=1)
+
         returns = advantages + values
         advantages = verl_F.masked_whiten(advantages, response_mask)
-    
-    return advantages, returns
-            
+    return advantages, returns, deltas
 
 
 # NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
