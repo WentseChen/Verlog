@@ -149,6 +149,10 @@ class ToolAgentLoop(AgentLoopBase):
             response_ids = output.token_ids[: self.response_length]
             response_mask = [1] * len(response_ids)
             
+            # # cut prompt and response to max lengths
+            # prompt_ids = prompt_ids[-self.prompt_length :]
+            # response_ids = response_ids[: self.response_length]
+            
             assert len(prompt_ids) <= self.prompt_length
             assert len(response_ids) <= self.response_length
             
@@ -174,7 +178,7 @@ class ToolAgentLoop(AgentLoopBase):
             if done and is_val:
                 break
             
-            if self.skip_loop_rate < np.random.rand():
+            if self.skip_loop_rate > np.random.rand():
                 if info["metrics"]["behavior/loop_rate"] > 0.:
                     continue
             

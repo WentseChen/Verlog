@@ -1290,6 +1290,8 @@ class RayPPOTrainer:
 
                     # update critic
                     if self.use_critic:
+                        is_warming = self.config.trainer.critic_warmup >= self.global_steps
+                        batch4train.meta_info["is_warming"] = is_warming
                         with marked_timer("update_critic", timing_raw, color="pink"):
                             critic_output = self.critic_wg.update_critic(batch4train)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
@@ -1299,7 +1301,7 @@ class RayPPOTrainer:
                     if self.config.trainer.critic_warmup < self.global_steps:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
-                            batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                            batch4train.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                             actor_output = self.actor_rollout_wg.update_actor(batch4train)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)

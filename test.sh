@@ -60,9 +60,9 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=True \
     trainer.balance_batch=False \
-    trainer.critic_warmup=0 \
-    trainer.critic_warmup_batch_repeat_times=0 \
-    trainer.critic_warmup_batch_divide_ratio=1 \
+    trainer.critic_warmup=2 \
+    trainer.critic_warmup_batch_repeat_times=2 \
+    trainer.critic_warmup_batch_divide_ratio=2 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='zero' \
     trainer.experiment_name='debug' \

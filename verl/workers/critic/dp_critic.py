@@ -267,7 +267,10 @@ class DataParallelPPOCritic(BasePPOCritic):
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(self.config.ppo_mini_batch_size)
 
-        for epoch_idx in range(self.config.ppo_epochs):
+        is_warming = data.meta_info.get("is_warming", False)
+        ppo_epochs = 1 if is_warming else self.config.ppo_epochs
+
+        for epoch_idx in range(ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 
                 is_last_mini_batch = (batch_idx == len(mini_batches) - 1) and (epoch_idx == self.config.ppo_epochs - 1)
