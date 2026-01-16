@@ -11,12 +11,27 @@ class BabaIsAILLMAgentsWrapper(gym.Wrapper):
     def __getattr__(self, name):
         return getattr(self.env, name)
     
+    def reset(self, **kwargs):
+        self.last_obs = None
+        return self.env.reset(**kwargs)
+    
     def step(self, action, is_valid=True):
         obs, reward, terminated, truncated, info = self.env.step(action)
         if not is_valid:
             reward = -self.format_penalty
         if self.binary_reward:
             reward = 1.0 if reward > 0 else reward
+            
+        if self.last_obs is not None:
+            is_loop = obs["text"]["long_term_context"] == self.last_obs
+        else:
+            is_loop = False
+        self.last_obs = obs["text"]["long_term_context"]
+        
+        info["metrics"] = {
+            "behavior/loop_rate": 1.0 if is_loop else 0.0
+        }
+        
         return obs, reward*1.0, terminated, truncated, info
        
     def extract_action(self, action):

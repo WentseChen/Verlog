@@ -1,11 +1,24 @@
+#!/bin/bash
+#SBATCH --job-name=fully_async
+#SBATCH --output=logs/slurm-%j.out
+#SBATCH --error=logs/slurm-%j.err
+#SBATCH --mem=200G
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --partition=gpuA100x4
+#SBATCH --account=bfoz-delta-gpu
+#SBATCH --time=23:59:59
+#SBATCH --gpus-per-node=4
+
 source /projects/bfoz/wchen11/anaconda3/bin/activate 
 conda activate verl
 
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name='debug'
-exp_name='debug'
+project_name='zero'
+exp_name='async_debug'
 
 # Ray
 # RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
@@ -50,7 +63,7 @@ loss_agg_mode="token-mean"
 temperature=1.0
 top_p=1.0
 top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
-val_top_p=0.7
+val_top_p=1.0
 
 # Performance Related Parameter
 use_dynamic_bsz=True
@@ -177,4 +190,4 @@ python -m recipe.fully_async_policy.fully_async_main \
     async_training.partial_rollout="${partial_rollout}" \
     async_training.use_rollout_log_probs=True \
     envs.env_name="babyai" \
-    envs.task="BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to"
+    envs.task="BabyAI-MixedTrainLocal-v0/open"

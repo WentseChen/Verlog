@@ -36,10 +36,35 @@ from verl.single_controller.ray import RayWorkerGroup
 from verl.utils.rollout_trace import rollout_trace_attr
 from verl.workers.rollout.replica import TokenOutput
 
+from verl.envs.env import Env
+from verl.envs.environments import make_env
+from verl.envs.captioners import make_captioner
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-
+class WorkerPoolQueue:
+    """Manages worker pool using asyncio.Queue"""
+    
+    def __init__(self, workers: list):
+        self.workers = workers
+        self.queue = asyncio.Queue()
+        # Initialize queue with all workers
+        for idx, worker in enumerate(workers):
+            self.queue.put_nowait((idx, worker))
+    
+    async def acquire(self) -> tuple[int, any]:
+        """Acquire a worker (waits if none available)"""
+        return await self.queue.get()
+    
+    async def release(self, worker_index: int, worker: any):
+        """Release worker back to pool"""
+        await self.queue.put((worker_index, worker))
+    
+    def qsize(self) -> int:
+        """Return number of available workers"""
+        return self.queue.qsize()
+    
 class FullyAsyncLLMServerManager(AsyncLLMServerManager):
     async def generate_for_partial(self, request_id, prompt_ids, sampling_params, **kwargs_extra) -> TokenOutput:
         """Generate tokens from prompt ids. with partial rollout function"""
@@ -64,7 +89,16 @@ class FullyAsyncAgentLoopOutput(AgentLoopOutput):
     """Indicate start parameter version when this response is generated"""
     param_version_end: int = 0
     """Indicate end parameter version when this response is generated, used for partial rollout"""
-
+    rewards: float = 0.0
+    """Cumulative rewards, for RL agent loop."""
+    dones: bool = False
+    """Whether the episode is done, for RL agent loop."""
+    env_idx: int = -1
+    """Environment index, for parallel environment handling."""
+    turn_idx: int = -1
+    """Turn index in the episode, for GAE calculation."""
+    env_info: dict = None
+    """Additional environment info returned after step."""
 
 @ray.remote
 class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
@@ -73,9 +107,16 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
     ):
         self.server_manager = FullyAsyncLLMServerManager(config, server_handles)
         super().__init__(config, server_handles, reward_router_address)
+        
+        env_name = config.envs.env_name
+        env_task = config.envs.task
+        base_env = make_env(env_name, env_task, config)
+        captioner = make_captioner(config)
+        self.env = Env(env_name, config, base_env, captioner)
+        self.env.reset()
 
     async def generate_sequences_no_post(
-        self, batch: DataProto, partial_output_list: Optional[list[AgentLoopOutput]]
+        self, batch: DataProto, partial_output_list: Optional[list[AgentLoopOutput]], worker_index: Optional[int] = 0
     ) -> list[AgentLoopOutput]:
         """Generate sequences from agent loop.
 
@@ -119,6 +160,10 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             kwargs["output"] = partial_output_list[i]
+            
+            kwargs["env_actor"] = self.env
+            kwargs["env_idx"] = worker_index
+            
             tasks.append(
                 asyncio.create_task(self._partial_run_agent_loop(sampling_params, trajectory_info[i], **kwargs))
             )
@@ -156,6 +201,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
 
 class FullyAsyncAgentLoopManager(AgentLoopManager):
     def __init__(self, config: DictConfig, worker_group: RayWorkerGroup = None, rm_wg: RayWorkerGroup = None):
+        
         self.config = config
         self.worker_group = worker_group
         self.reward_model_manager = None
@@ -168,7 +214,9 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         self.server_handles = None
         self.server_addresses = None
         self.agent_loop_workers = None
-
+        
+        self._worker_pool_lock = asyncio.Lock()
+        
     @classmethod
     async def create(cls, config: DictConfig, worker_group: RayWorkerGroup = None, rm_wg: RayWorkerGroup = None):
         instance = cls(config, worker_group, rm_wg)
@@ -229,9 +277,24 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         Returns:
             list[AgentLoopOutput]: Processing results
         """
-        worker = self._select_best_worker()
-        output_future = worker.generate_sequences_no_post.remote(sample, partial_output_list)
-        return await asyncio.wrap_future(output_future.future())
+        async with self._worker_pool_lock:
+            if not hasattr(self, "worker_pool"):
+                self.worker_pool = WorkerPoolQueue(self.agent_loop_workers)
+        
+        worker_index, worker = await self.worker_pool.acquire()
+        
+        try:
+            output_future = worker.generate_sequences_no_post.remote(
+                sample, partial_output_list, worker_index
+            )
+            result = await asyncio.wrap_future(output_future.future())
+            return result
+        finally:
+            await self.worker_pool.release(worker_index, worker)
+        
+        # worker_index, worker = self._select_best_worker()
+        # output_future = worker.generate_sequences_no_post.remote(sample, partial_output_list, worker_index)
+        # return await asyncio.wrap_future(output_future.future())
 
     def _select_best_worker(self):
         """Select the best worker, simple round-robin load balancing"""
@@ -240,7 +303,8 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
 
         worker = self.agent_loop_workers[self._worker_index]
         self._worker_index = (self._worker_index + 1) % len(self.agent_loop_workers)
-        return worker
+        selected_work_index = self._worker_index
+        return selected_work_index, worker
 
     async def cancel(self):
         await asyncio.gather(*[replica.cancel() for replica in self.rollout_replicas])

@@ -258,6 +258,12 @@ def merge_rollout_sample(config, tokenizer, rs: RolloutSample, processor):
 
     # Step 2: Add uid
     rs.full_batch.non_tensor_batch["uid"] = np.array([f"uid_{rs.sample_id}"] * len(rs.full_batch), dtype=object)
+    
+    
+    rs.full_batch.non_tensor_batch["rewards"] = np.array([x.rewards for x in rs.agent_loop_output_list], dtype=np.float32)
+    rs.full_batch.non_tensor_batch["dones"] = np.array([x.dones for x in rs.agent_loop_output_list], dtype=bool)
+    rs.full_batch.non_tensor_batch["env_idx"] = np.array([x.env_idx for x in rs.agent_loop_output_list], dtype=np.int32)
+    rs.full_batch.non_tensor_batch["turn_idx"] = np.array([x.turn_idx for x in rs.agent_loop_output_list], dtype=np.int32)
 
     # Step 2: Merge batches
     # Merge the non_tensor_batch and meta_info of original_batch into final_batch
@@ -272,6 +278,12 @@ def merge_rollout_sample(config, tokenizer, rs: RolloutSample, processor):
         rs.processing_times.append(agent_loop.metrics.generate_sequences)
     rs.param_version_start = [agent_loop.param_version_start for agent_loop in rs.agent_loop_output_list]
     rs.param_version_end = [agent_loop.param_version_end for agent_loop in rs.agent_loop_output_list]
+    
+    env_metrics = {}
+    for key in rs.agent_loop_output_list[0].env_info["metrics"]:
+        env_metrics[key] = np.mean([x.env_info["metrics"][key] for x in rs.agent_loop_output_list], dtype=np.float32)
+    rs.rollout_status.update(env_metrics)
+    
     # Step 4, clear agent_loop_output_list
     rs.agent_loop_output_list = []
     return rs
@@ -306,8 +318,21 @@ def assemble_batch_from_rollout_samples(
     rollout_samples_batch = []
     processing_times = []
     rollout_status = rollout_samples[0].rollout_status
-    # Add a prefix to all rollout_status keys
-    rollout_status = {f"fully_async/{key}": value for key, value in rollout_status.items()}
+    
+    for key in rollout_status:
+        if key.startswith("behavior/"):
+            rollout_status[key] = sum(rs.rollout_status.get(key, 0) for rs in rollout_samples)
+            rollout_status[key] /= len(rollout_samples)
+    
+    # Add a prefix to all rollout_status keys    
+    # rollout_status = {(f"fully_async/{k}" if not k.startswith("behavior/") else k): v for k, v in rollout_status.items()}
+    rollout_status = {f"fully_async/{k}": v for k, v in rollout_status.items()}
+    
+    # for rollout_idx in range(len(rollout_samples)):
+    #     if "env_actor" in rollout_samples[rollout_idx].full_batch.meta_info:
+    #         rollout_samples[rollout_idx].full_batch.meta_info.pop("env_actor")
+    #     if "env_idx" in rollout_samples[rollout_idx].full_batch.meta_info:
+    #         rollout_samples[rollout_idx].full_batch.meta_info.pop("env_idx")
 
     for rs in rollout_samples:
         rollout_samples_batch.append(rs.full_batch)
@@ -339,6 +364,7 @@ def assemble_batch_from_rollout_samples(
     }
     processing_time_stats = {f"fully_async/{key}": value for key, value in processing_time_stats.items()}
 
+    rs = rollout_samples[0]
     param_version_diff = [abs(a - b) for a, b in zip(rs.param_version_end, rs.param_version_start, strict=False)]
     num_diff0 = param_version_diff.count(0)
     partial_stats = {

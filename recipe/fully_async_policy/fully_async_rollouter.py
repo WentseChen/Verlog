@@ -129,7 +129,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.total_generated_samples = 0
         self.staleness_samples = 0
         self.dropped_stale_samples = 0
-        self.processed_sample_count = 0
+        # self.processed_sample_count = 0 # TODO: not ignore
         self.global_steps = 0
         self.idle_start_time = None
         self.version_start_time = None
@@ -430,8 +430,6 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             rollout_sample.param_version = self.current_param_version
             rollout_sample.rollout_status = await self.get_statistics()
             await self.result_queue.put(rollout_sample)
-
-        self.processed_sample_count += 1
 
     async def _consumer_worker(self):
         """

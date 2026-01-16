@@ -1,11 +1,12 @@
+
 source /projects/bfoz/wchen11/anaconda3/bin/activate 
 conda activate verl
 
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name='debug'
-exp_name='debug'
+project_name='zero'
+exp_name='async_debug'
 
 # Ray
 # RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
@@ -50,7 +51,7 @@ loss_agg_mode="token-mean"
 temperature=1.0
 top_p=1.0
 top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
-val_top_p=0.7
+val_top_p=1.0
 
 # Performance Related Parameter
 use_dynamic_bsz=True
@@ -155,12 +156,12 @@ python -m recipe.fully_async_policy.fully_async_main \
     +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
     +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
     +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
-    trainer.critic_warmup=40 \
+    trainer.critic_warmup=1 \
     trainer.balance_batch=False \
     trainer.logger=['console','wandb'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.save_freq=-1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
@@ -177,4 +178,4 @@ python -m recipe.fully_async_policy.fully_async_main \
     async_training.partial_rollout="${partial_rollout}" \
     async_training.use_rollout_log_probs=True \
     envs.env_name="babyai" \
-    envs.task="BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to"
+    envs.task="BabyAI-MixedTrainLocal-v0/goto"

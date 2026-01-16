@@ -15,6 +15,7 @@ import logging
 import os
 from typing import Any, Optional
 from uuid import uuid4
+import numpy as np
 
 from recipe.fully_async_policy.agent_loop.agent_loop import AgentLoopOutput, FullyAsyncAgentLoopOutput
 from verl.experimental.agent_loop import AgentLoopBase
@@ -37,7 +38,13 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         output: Optional[FullyAsyncAgentLoopOutput] = kwargs.get("output", None)
-        messages = list(kwargs["raw_prompt"])
+        
+        env_actor = kwargs.get("env_actor", None)
+        env_idx = kwargs.get("env_idx", None)
+        
+        messages, env_info = env_actor.get_last_obs()  
+        turn_idx = env_info.get("turn_idx", -1) 
+
         param_version = kwargs.get("param_version", 0)
 
         metrics = {}
@@ -96,17 +103,37 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
             prompt_ids = output.prompt_ids
             log_probs = output.log_probs + log_probs
             response_ids = output.response_ids + response_ids
-            response_mask = [1] * len(response_ids)
 
+        response_ids = response_ids[: self.response_length]
+        response_mask = [1] * len(response_ids)
+            
+        # env step 
+        if not is_cancel:
+            actions = await self.loop.run_in_executor(
+                None,
+                lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
+            )
+            messages, reward, terminated, truncated, env_info = env_actor.step(actions)
+            done = np.logical_or(terminated, truncated)
+        else:
+            reward = 0.0
+            done = True
+        
+        # create training sample output
         return FullyAsyncAgentLoopOutput(
             prompt_ids=prompt_ids,
-            response_ids=response_ids[: self.response_length],
-            response_mask=response_mask[: self.response_length],
-            num_turns=2,
+            response_ids=response_ids,
+            response_mask=response_mask,
+            num_turns=len(messages)+1,
             metrics=metrics,
             is_cancel=is_cancel,
             log_probs=log_probs,
             param_version_start=param_version_start,
             param_version_end=param_version_end,
+            rewards=reward,
+            dones=done,
+            env_idx=env_idx,
+            turn_idx=turn_idx,
+            env_info=env_info,
             # multi_modal_data={"image": image_data} if image_data is not None else {},
         )

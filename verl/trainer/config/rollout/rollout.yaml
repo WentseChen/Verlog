@@ -203,7 +203,7 @@ agent:
   _target_: verl.workers.config.AgentLoopConfig
 
   # Number of agent loop workers
-  num_workers: 8
+  num_workers: 16
 
   # default agent loop to use if `agent_name` not set in RL dataset
   default_agent_loop: single_turn_agent

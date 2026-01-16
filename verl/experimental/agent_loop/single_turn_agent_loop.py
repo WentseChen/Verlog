@@ -16,6 +16,7 @@ import logging
 import os
 from typing import Any
 from uuid import uuid4
+import numpy as np
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.utils.profiler import simple_timer
@@ -37,44 +38,65 @@ class SingleTurnAgentLoop(AgentLoopBase):
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
         image_data = copy.deepcopy((kwargs.get("multi_modal_data") or {}).get("image", None))
-
+        
+        env_actor = kwargs.get("env_actor", None)
+        env_idx = kwargs.get("env_idx", None)
+        
+        messages, env_info = env_actor.reset() 
+        done = False 
+        num_turn = 1
+        
         metrics = {}
         request_id = uuid4().hex
 
-        # Use processor if available for multimodal support
-        if self.processor is not None:
-            raw_prompt = await self.loop.run_in_executor(
-                None,
-                lambda: self.processor.apply_chat_template(
-                    messages,
-                    add_generation_prompt=True,
-                    tokenize=False,
-                    **self.apply_chat_template_kwargs,
-                ),
-            )
-            model_inputs = self.processor(text=[raw_prompt], images=image_data, return_tensors="pt")
-            prompt_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
-        else:
-            prompt_ids = await self.loop.run_in_executor(
-                None,
-                lambda: self.tokenizer.apply_chat_template(
-                    messages, add_generation_prompt=True, tokenize=True, **self.apply_chat_template_kwargs
-                ),
-            )
+        while not done:
+            
+            # Use processor if available for multimodal support
+            if self.processor is not None:
+                raw_prompt = await self.loop.run_in_executor(
+                    None,
+                    lambda: self.processor.apply_chat_template(
+                        messages,
+                        add_generation_prompt=True,
+                        tokenize=False,
+                        **self.apply_chat_template_kwargs,
+                    ),
+                )
+                model_inputs = self.processor(text=[raw_prompt], images=image_data, return_tensors="pt")
+                prompt_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
+            else:
+                prompt_ids = await self.loop.run_in_executor(
+                    None,
+                    lambda: self.tokenizer.apply_chat_template(
+                        messages, add_generation_prompt=True, tokenize=True, **self.apply_chat_template_kwargs
+                    ),
+                )
 
-        with simple_timer("generate_sequences", metrics):
-            output = await self.server_manager.generate(
-                request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, image_data=image_data
+            with simple_timer("generate_sequences", metrics):
+                output = await self.server_manager.generate(
+                    request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, image_data=image_data
+                )
+            
+            response_ids = output.token_ids[: self.response_length]
+            response_mask = [1] * len(output.token_ids)
+            
+            actions = await self.loop.run_in_executor(
+                None,
+                lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
             )
-        response_mask = [1] * len(output.token_ids)
-
+            
+            messages, reward, terminated, truncated, _ = env_actor.step(actions)
+            done = np.logical_or(terminated, truncated)
+            num_turn += 1
+            
         output = AgentLoopOutput(
             prompt_ids=prompt_ids,
-            response_ids=output.token_ids[: self.response_length],
+            response_ids=response_ids,
             response_mask=response_mask[: self.response_length],
             response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
             multi_modal_data={"image": image_data} if image_data is not None else {},
-            num_turns=2,
+            num_turns=num_turn,
             metrics=metrics,
+            reward_score=reward,
         )
         return output

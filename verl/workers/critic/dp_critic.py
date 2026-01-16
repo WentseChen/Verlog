@@ -35,8 +35,70 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs
 from verl.workers.critic import BasePPOCritic
 
+import verl.utils.torch_functional as verl_F
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def get_off_policy_metric(returns, vpreds, response_mask, values, cliprange_value):
+    """
+    Calculate off-policy metrics for value function analysis.
+    
+    Args:
+        returns: Target returns
+        vpreds: Value predictions from current forward pass
+        response_mask: Mask indicating valid response tokens
+        values: Old value predictions (from data collection)
+        cliprange_value: Clipping range for value function
+        
+    Returns:
+        Dictionary containing off-policy metrics
+    """
+    with torch.no_grad():
+        
+        # get clipped value predictions
+        vpredclipped = verl_F.clip_by_value(
+            vpreds, 
+            values - cliprange_value, 
+            values + cliprange_value
+        )
+        vf_losses1 = (vpreds - returns) ** 2
+        vf_losses2 = (vpredclipped - returns) ** 2
+        clipped_vf_losses = torch.max(vf_losses1, vf_losses2)
+        is_clipped = (vf_losses2 > vf_losses1).float()
+        
+        # get clipped value statistics
+        E_clip_value = verl_F.masked_mean(is_clipped * vpreds, response_mask)
+        E_clip_norm = verl_F.masked_mean(is_clipped * vpreds ** 2, response_mask)
+        E_value = verl_F.masked_mean(vpreds, response_mask)
+        E_norm = verl_F.masked_mean(vpreds ** 2, response_mask)
+        clip_value_ratio = E_clip_value / (E_value + 1e-8)
+        clip_norm_ratio = E_clip_norm / (E_norm + 1e-8)
+        
+        # get delta statistics
+        delta = (vpreds - returns)
+        E_delta = verl_F.masked_mean(delta, response_mask)
+        E_delta_norm = verl_F.masked_mean(delta ** 2, response_mask)
+        std_delta = torch.sqrt(E_delta_norm - E_delta ** 2 + 1e-8)
+        
+        delta_clip = torch.clamp(delta, -cliprange_value, cliprange_value)
+        E_delta_clip = verl_F.masked_mean(delta_clip, response_mask)
+        E_delta_clip_norm = verl_F.masked_mean(delta_clip ** 2, response_mask)
+        std_delta_clip = torch.sqrt(E_delta_clip_norm - E_delta_clip ** 2 + 1e-8)
+        
+        metrics = {
+            "clipped_v/mean": E_clip_value.item(),
+            "clipped_v/norm": E_clip_norm.item(),
+            "clipped_v/mean_ratio": clip_value_ratio.item(),
+            "clipped_v/norm_ratio": clip_norm_ratio.item(),
+            "IS_delta/delta_mean": E_delta.item(),
+            "IS_delta/delta_std": std_delta.item(),
+            "IS_delta/delta_clipped_mean": E_delta_clip.item(),
+            "IS_delta/delta_clipped_std": std_delta_clip.item(),
+        }
+        
+    return metrics
 
 
 class DataParallelPPOCritic(BasePPOCritic):
@@ -193,6 +255,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         # make sure we are in training mode
         self.critic_module.train()
         metrics = {}
+        last_mb_metrics = {}
 
         select_keys = ["input_ids", "responses", "response_mask", "attention_mask", "position_ids", "values", "returns"]
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
@@ -204,8 +267,14 @@ class DataParallelPPOCritic(BasePPOCritic):
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(self.config.ppo_mini_batch_size)
 
-        for _ in range(self.config.ppo_epochs):
+        is_warming = data.meta_info.get("is_warming", False)
+        ppo_epochs = 1 if is_warming else self.config.ppo_epochs
+
+        for epoch_idx in range(ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
+                
+                is_last_mini_batch = (batch_idx == len(mini_batches) - 1) and (epoch_idx == self.config.ppo_epochs - 1)
+                
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
@@ -234,6 +303,16 @@ class DataParallelPPOCritic(BasePPOCritic):
                         cliprange_value=self.config.cliprange_value,
                         loss_agg_mode=self.config.loss_agg_mode,
                     )
+                    
+                    # Calculate off-policy metrics
+                    off_policy_metrics = get_off_policy_metric(
+                        returns=returns,
+                        vpreds=vpreds,
+                        response_mask=response_mask,
+                        values=values,
+                        cliprange_value=self.config.cliprange_value,
+                    )
+                    
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
@@ -251,11 +330,25 @@ class DataParallelPPOCritic(BasePPOCritic):
                             "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
                         }
                     )
+                    
+                    # Add off-policy metrics to micro_batch_metrics
+                    micro_batch_metrics.update(off_policy_metrics)
 
                     append_to_dict(metrics, micro_batch_metrics)
+                    
+                    if is_last_mini_batch:
+                        append_to_dict(last_mb_metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"critic/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
+                
+                if is_last_mini_batch:
+                    append_to_dict(last_mb_metrics, mini_batch_metrics)
+        
+        # Add last mini-batch metrics with "(last_mb)" suffix
+        for key, value in last_mb_metrics.items():
+            metrics[f"{key}_(last_mb)"] = value
+                
         self.critic_optimizer.zero_grad()
         return metrics

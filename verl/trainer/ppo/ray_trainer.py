@@ -62,6 +62,23 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 
 
+def get_episode_structure(episode_idx: np.ndarray):
+    """
+    Given an array of episode indices, return a list of lists,
+    where each sublist contains the indices belonging to one episode.
+    
+    Example:
+    >>> episode_idx = np.array([0,0,0,1,1,1,1,2,2])
+    >>> get_episode_structure(episode_idx)
+    [[0, 1, 2], [3, 4, 5, 6], [7, 8]]
+    """
+    episodes = []
+    unique_eps = np.unique(episode_idx)
+    for ep in unique_eps:
+        indices = np.where(episode_idx == ep)[0].tolist()
+        episodes.append(indices)
+    return episodes
+
 @dataclass
 class ResourcePoolManager:
     """
@@ -211,16 +228,25 @@ def compute_advantage(
         data.batch["response_mask"] = compute_response_mask(data)
     # prepare response group
     if adv_estimator == AdvantageEstimator.GAE:
+        episode_idx = data.non_tensor_batch["env_idx"]
+        episode_structure = get_episode_structure(episode_idx)
+        
+        dones_np = data.non_tensor_batch["dones"]
+        dones_th = torch.tensor(dones_np, device=data.batch["response_mask"].device)
         # Compute advantages and returns using Generalized Advantage Estimation (GAE)
-        advantages, returns = core_algos.compute_gae_advantage_return(
+        advantages, returns, deltas = core_algos.compute_gae_advantage_return(
             token_level_rewards=data.batch["token_level_rewards"],
             values=data.batch["values"],
             response_mask=data.batch["response_mask"],
-            gamma=gamma,
-            lam=lam,
+            step_gamma=gamma,
+            step_lam=lam,
+            dones=dones_th,
+            episode_structure=episode_structure,
+            turn_idx=data.non_tensor_batch.get("turn_idx", None),
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+        data.batch["deltas"] = deltas
         if config.get("use_pf_ppo", False):
             data = core_algos.compute_pf_ppo_reweight_data(
                 data,
@@ -586,13 +612,19 @@ class RayPPOTrainer:
                 else self.config.actor_rollout_ref.rollout.agent.num_workers
             )
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
+            
+            num_envs = self.config.actor_rollout_ref.rollout.agent.num_workers
+            test_gen_batch_padded = test_gen_batch_padded.slice(start=0, end=num_envs)
+            test_batch = test_batch.slice(start=0, end=num_envs)
+            
             if not self.async_rollout_mode:
                 test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
             else:
                 test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
-            # unpad
-            test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
+            # # unpad
+            # test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
+            test_output_gen_batch = test_output_gen_batch_padded # TODO
 
             print("validation generation end")
 

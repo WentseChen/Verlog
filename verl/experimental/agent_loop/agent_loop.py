@@ -43,6 +43,10 @@ from verl.utils.rollout_trace import (
 from verl.utils.transferqueue_utils import tqbridge
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
+from verl.envs.env import Env
+from verl.envs.environments import make_env
+from verl.envs.captioners import make_captioner
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -303,9 +307,16 @@ class AgentLoopWorkerBase:
             trace_config.get("backend"),
             trace_config.get("token2text", False),
         )
+        
+        env_name = config.envs.env_name
+        env_task = config.envs.task
+        base_env = make_env(env_name, env_task, config)
+        captioner = make_captioner(config)
+        self.val_env = Env(env_name, config, base_env, captioner)
+        self.val_env.reset()
 
     @tqbridge()
-    async def generate_sequences(self, batch: DataProto) -> DataProto:
+    async def generate_sequences(self, batch: DataProto, worker_index: int) -> DataProto:
         """Generate sequences from agent loop.
 
         Args:
@@ -356,6 +367,9 @@ class AgentLoopWorkerBase:
         tasks = []
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
+            kwargs["env_actor"] = self.val_env
+            kwargs["env_idx"] = worker_index
+            kwargs["validate"] = batch.meta_info.get("validate", False)
             tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], **kwargs)))
         outputs = await asyncio.gather(*tasks)
 
@@ -517,9 +531,13 @@ class AgentLoopWorkerBase:
                     batch=batch,
                     non_tensor_batch=non_tensor_batch,
                 )
-                result = await self.reward_manager_worker.compute_score.remote(data)
-                output.reward_score = result["reward_score"]
-                output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+                
+                output.reward_score = output.reward_score
+                output.extra_fields["reward_extra_info"] = dict()
+                
+                # result = await self.reward_manager_worker.compute_score.remote(data)
+                # output.reward_score = result["reward_score"]
+                # output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
             return _InternalAgentLoopOutput(
                 prompt_ids=prompt_output["input_ids"],
@@ -750,11 +768,12 @@ class AgentLoopManager:
         if self.reward_model_manager and self.config.reward_model.rollout.free_cache_engine:
             self.reward_model_manager.wake_up()
 
+        prompts = prompts.slice(start=0, end=len(self.agent_loop_workers))
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = ray.get(
             [
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                worker.generate_sequences.remote(chunk, i)
+                for i, (worker, chunk) in enumerate(zip(self.agent_loop_workers, chunkes, strict=True))
             ]
         )
         output = DataProto.concat(outputs)

@@ -50,6 +50,26 @@ from verl.utils.metric import (
 from verl.utils.rollout_skip import RolloutSkip
 
 
+def remove_last_turn_in_episode(batch: DataProto) -> DataProto:
+    """
+    Remove the last index from each episode group.
+
+    Example:
+    episode_idx = [0,1,2,0,1,2,0,2]
+    -> returns batch[0,1,2,3,5]
+    (0,3,5 are the last indices of each episode group.)
+    """
+    episode_idx = batch.non_tensor_batch["env_idx"]
+
+    last_indices = []
+    for env_id in np.unique(episode_idx):
+        env_mask = np.where(episode_idx == env_id)[0]
+        last_indices.append(env_mask[-1])
+    last_indices = np.array(last_indices)
+    
+    keep_indices = np.setdiff1d(np.arange(len(episode_idx)), last_indices)
+    return batch.select_idxs(keep_indices)
+
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def init_workers(self):
         """Initialize distributed training workers using Ray backend.
@@ -403,14 +423,23 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             with marked_timer("values", timing_raw, color="cyan"):
                 values = self.critic_wg.compute_values(batch)
                 batch = batch.union(values)
-
-        with marked_timer("adv", timing_raw, color="brown"):
+                
+        if False:
             # we combine with rule-based rm
             reward_extra_infos_dict: dict[str, list]
             if self.config.reward_model.launch_reward_fn_async:
                 reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
             batch.batch["token_level_scores"] = reward_tensor
-
+        
+        with marked_timer("adv", timing_raw, color="brown"):
+            
+            seq_len = batch.batch['response_mask'].sum(-1) - 1
+            indices = torch.arange(batch.batch['response_mask'].shape[0], device=seq_len.device)
+            batch.batch['token_level_scores'] = torch.zeros_like(batch.batch['response_mask'], dtype=torch.float64)
+            rewards = batch.non_tensor_batch['rewards']
+            rewards = torch.tensor(rewards, device=batch.batch['token_level_scores'].device).to(torch.float64)
+            batch.batch['token_level_scores'][indices, seq_len] = rewards.clone()
+            
             if reward_extra_infos_dict:
                 batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
@@ -445,10 +474,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 config=self.config.algorithm,
             )
 
+        # the last turn for each episode (parallel environment) is only used for bootstrapping the value,
+        batch4train = remove_last_turn_in_episode(batch)
         # update critic
         if self.use_critic:
             with marked_timer("update_critic", timing_raw, color="pink"):
-                critic_output = self.critic_wg.update_critic(batch)
+                critic_output = self.critic_wg.update_critic(batch4train)
             critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
             metrics.update(critic_output_metrics)
 
@@ -456,8 +487,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self.config.trainer.critic_warmup <= self.global_steps:
             # update actor
             with marked_timer("update_actor", timing_raw, color="red"):
-                batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                actor_output = self.actor_rollout_wg.update_actor(batch)
+                batch4train.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                actor_output = self.actor_rollout_wg.update_actor(batch4train)
             actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
             metrics.update(actor_output_metrics)
         return batch, reward_extra_infos_dict

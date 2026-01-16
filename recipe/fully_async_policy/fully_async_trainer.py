@@ -99,7 +99,7 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
 
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
         self.require_batches = config.async_training.require_batches
-        self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches
+        self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches + config.actor_rollout_ref.rollout.agent.num_workers 
         self.compute_prox_log_prob = self.config.async_training.compute_prox_log_prob
         total_gpus = (
             config.trainer.nnodes * config.trainer.n_gpus_per_node
