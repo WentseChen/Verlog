@@ -90,6 +90,8 @@ class Env:
         observations, reward, terminated, truncated, infos = self.env.step(action)
         info = dict(next(iter(infos.values()))) if infos else {}
         agent_id = self._extract_agent_id_from_action(action)
+        if agent_id is None and getattr(self.env, "possible_agents", None):
+            agent_id = self.env.possible_agents[0]
         obs_text = observations.get(agent_id, {}).get("prompt", "")
         info["agent_id"] = agent_id
         info["raw_infos"] = infos
