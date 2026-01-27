@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import requests
 
 from verl.envs.environments.dummy_openai_env import DummyOpenAIEnv
+from verl.envs.environments.dummy_openai_multi_env import DummyOpenAIMultiEnv
 
 
 def _normalize_base_url(base_url: str) -> str:
@@ -21,34 +22,38 @@ def main() -> None:
     parser.add_argument("--model", default="Qwen/Qwen2.5-3B-Instruct", help="Model name exposed by vLLM")
     parser.add_argument("--api-key", default="EMPTY", help="API key for vLLM server (if required)")
     parser.add_argument("--prompt", default="what's 1+1?", help="User prompt for dummy env")
+    parser.add_argument("--multi-agent", action="store_true", help="Use multi-agent dummy env")
+    parser.add_argument("--num-agents", type=int, default=2, help="Number of agents for multi-agent env")
     parser.add_argument("--max-tokens", type=int, default=64, help="Max tokens to generate")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature")
     args = parser.parse_args()
 
-    env = DummyOpenAIEnv(prompt=args.prompt)
+    if args.multi_agent:
+        env = DummyOpenAIMultiEnv(prompt=args.prompt, num_agents=args.num_agents)
+    else:
+        env = DummyOpenAIEnv(prompt=args.prompt)
     observations, _ = env.reset()
-    agent_id = env.possible_agents[0]
-    prompt = observations.get(agent_id, {}).get("prompt", args.prompt)
-    messages = [{"role": "user", "content": prompt}]
     base_url = _normalize_base_url(args.base_url)
     url = f"{base_url}/chat/completions"
 
-    payload = {
-        "model": args.model,
-        "messages": messages,
-        "max_tokens": args.max_tokens,
-        "temperature": args.temperature,
-    }
     headers = {"Authorization": f"Bearer {args.api_key}"}
+    for agent_id in env.possible_agents:
+        prompt = observations.get(agent_id, {}).get("prompt", args.prompt)
+        messages = [{"role": "user", "content": prompt}]
+        payload = {
+            "model": args.model,
+            "messages": messages,
+            "max_tokens": args.max_tokens,
+            "temperature": args.temperature,
+        }
+        response = requests.post(url, json=payload, headers=headers, timeout=120)
+        response.raise_for_status()
+        data = response.json()
 
-    response = requests.post(url, json=payload, headers=headers, timeout=120)
-    response.raise_for_status()
-    data = response.json()
+        content = data["choices"][0]["message"]["content"]
+        print(f"{agent_id} assistant: {content}")
 
-    content = data["choices"][0]["message"]["content"]
-    print(f"assistant: {content}")
-
-    env.step(content)
+    env.step({agent_id: "" for agent_id in env.possible_agents})
 
 
 if __name__ == "__main__":

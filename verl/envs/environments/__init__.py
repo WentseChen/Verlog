@@ -47,6 +47,12 @@ def make_env(env_name, task, config, render_mode=None):
 
         dummy_prompt = getattr(config.envs, "dummy_prompt", "what's 1+1?")
         return DummyOpenAIEnv(prompt=dummy_prompt)
+    elif env_name == "dummy_openai_multi":
+        from verl.envs.environments.dummy_openai_multi_env import DummyOpenAIMultiEnv
+
+        dummy_prompt = getattr(config.envs, "dummy_prompt", "what's 1+1?")
+        num_agents = getattr(config.envs, "dummy_num_agents", 2)
+        return DummyOpenAIMultiEnv(prompt=dummy_prompt, num_agents=num_agents)
     else:
         raise ValueError(f"Unknown environment: {env_name}")
     
