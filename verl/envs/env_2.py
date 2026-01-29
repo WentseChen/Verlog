@@ -11,14 +11,16 @@ from src.wrappers.pettingzoo_wrapper import AdmissionsPettingZooEnv
 
 
 class Env:
-    def __init__(self, env_name, config, captioner=None):
+    def __init__(self, env_name, config, env=None, captioner=None):
         self.env_name = env_name
         self.config = config
-        self.env = self._build_env()
+        self.env = env if env is not None else self._build_env()
         self.agent_id = None
         self.history = HistoryManager(self.env)
         self.last_msg = None
         self.last_info = None
+        self.last_msg_by_agent = {}
+        self.last_info_by_agent = {}
 
     def _build_env(self):
         game_config = None
@@ -35,8 +37,8 @@ class Env:
             }
         return AdmissionsPettingZooEnv(game_config=game_config)
 
-    def _build_messages(self, obs_text: str):
-        return self.history.add_user_message(self.agent_id, obs_text)
+    def _build_messages(self, obs_text: str, agent_id: str | None):
+        return self.history.add_user_message(agent_id, obs_text)
 
     def _normalize_actions(self, action_text: str, agent_id: str | None):
         if agent_id is None:
@@ -47,20 +49,48 @@ class Env:
             actions[agent_id] = action_text
         return actions
 
-    def get_last_obs(self):
+    def get_last_obs(self, agent_id: str | None = None):
+        if agent_id is not None:
+            return self.last_msg_by_agent.get(agent_id), self.last_info_by_agent.get(agent_id)
         return self.last_msg, self.last_info
+
+    def _pick_agent_from_action(self, action) -> str | None:
+        if action is None:
+            return None
+        if isinstance(action, dict):
+            if "messages" in action and isinstance(action["messages"], list):
+                for msg in action["messages"]:
+                    if isinstance(msg, dict) and msg.get("role") == "system":
+                        return None
+            if len(action) == 1:
+                only_key = next(iter(action.keys()))
+                if isinstance(only_key, str):
+                    return only_key
+        return None
 
     def step(self, action):
         # action is the agent's response text; env returns prompts/messages
         if self.agent_id is None and self.env.possible_agents:
             self.agent_id = self.env.possible_agents[0]
 
-        action_text = action if action is not None else ""
+        action_text = ""
+        if isinstance(action, dict):
+            picked_agent = self._pick_agent_from_action(action)
+            if picked_agent is not None:
+                self.agent_id = picked_agent
+                action_text = action.get(self.agent_id, "")
+            else:
+                action_text = ""
+        else:
+            action_text = action if action is not None else ""
+
         actions = self._normalize_actions(action_text, self.agent_id)
 
         observations, rewards, terminations, truncations, infos = self.env.step(actions)
 
         obs_text = observations.get(self.agent_id, "") if observations else ""
+        if isinstance(obs_text, dict):
+            obs_text = obs_text.get("prompt", "")
         reward = rewards.get(self.agent_id, 0.0) if rewards else 0.0
         terminated = terminations.get(self.agent_id, False) if terminations else False
         truncated = truncations.get(self.agent_id, False) if truncations else False
@@ -70,21 +100,32 @@ class Env:
 
         if action_text:
             self.history.add_assistant_message(self.agent_id, action_text)
-        messages = self._build_messages(obs_text)
+        messages = self._build_messages(obs_text, self.agent_id)
         self.last_msg = messages
         self.last_info = info
+        if self.agent_id is not None:
+            self.last_msg_by_agent[self.agent_id] = messages
+            self.last_info_by_agent[self.agent_id] = info
         return messages, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(self, agent_id: str | None = None):
         observations, infos = self.env.reset()
-        self.agent_id = self.env.possible_agents[0] if self.env.possible_agents else None
+        if agent_id is None:
+            self.agent_id = self.env.possible_agents[0] if self.env.possible_agents else None
+        else:
+            self.agent_id = agent_id
         obs_text = observations.get(self.agent_id, "") if observations else ""
+        if isinstance(obs_text, dict):
+            obs_text = obs_text.get("prompt", "")
         info = dict(infos.get(self.agent_id, {})) if infos else {}
         info["agent_id"] = self.agent_id
         info["raw_infos"] = infos
-        messages = self._build_messages(obs_text)
+        messages = self._build_messages(obs_text, self.agent_id)
         self.last_msg = messages
         self.last_info = info
+        if self.agent_id is not None:
+            self.last_msg_by_agent[self.agent_id] = messages
+            self.last_info_by_agent[self.agent_id] = info
         return messages, info
 
     def render(self):

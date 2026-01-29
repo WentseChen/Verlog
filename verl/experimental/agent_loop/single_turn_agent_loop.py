@@ -60,5 +60,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
             multi_modal_data={"image": image_data} if image_data is not None else {},
             num_turns=2,
             metrics=metrics,
+            agent_id=kwargs.get("agent_id"),
+            turn_id=0,
         )
         return output

@@ -18,6 +18,8 @@ class Env:
         self.env = env if env is not None else self._build_env()
         self.last_msg = None
         self.last_info = None
+        self.last_msg_by_agent = {}
+        self.last_info_by_agent = {}
 
     def _build_env(self):
         game_config = None
@@ -73,6 +75,12 @@ class Env:
                 return self._extract_agent_id_from_action(action["messages"])
             if "system" in action and isinstance(action["system"], str):
                 return self._extract_agent_id_from_text(action["system"])
+            if len(action) == 1:
+                only_key = next(iter(action.keys()))
+                if isinstance(only_key, str):
+                    if getattr(self.env, "possible_agents", None) and only_key in self.env.possible_agents:
+                        return only_key
+                    return only_key
         if isinstance(action, str):
             return self._extract_agent_id_from_text(action)
         return None
@@ -83,7 +91,9 @@ class Env:
             return None
         return match.group(1)
 
-    def get_last_obs(self):
+    def get_last_obs(self, agent_id: str | None = None):
+        if agent_id is not None:
+            return self.last_msg_by_agent.get(agent_id), self.last_info_by_agent.get(agent_id)
         return self.last_msg, self.last_info
 
     def step(self, action):
@@ -92,17 +102,29 @@ class Env:
         agent_id = self._extract_agent_id_from_action(action)
         if agent_id is None and getattr(self.env, "possible_agents", None):
             agent_id = self.env.possible_agents[0]
+        if isinstance(reward, dict) and agent_id is not None:
+            reward = reward.get(agent_id, 0.0)
+        if isinstance(terminated, dict) and agent_id is not None:
+            terminated = terminated.get(agent_id, False)
+        if isinstance(truncated, dict) and agent_id is not None:
+            truncated = truncated.get(agent_id, False)
+        if isinstance(infos, dict) and agent_id is not None:
+            info = dict(infos.get(agent_id, info))
         obs_text = observations.get(agent_id, {}).get("prompt", "")
         info["agent_id"] = agent_id
         info["raw_infos"] = infos
         messages = self._build_messages(obs_text, agent_id)
         self.last_msg = messages
         self.last_info = info
+        if agent_id is not None:
+            self.last_msg_by_agent[agent_id] = messages
+            self.last_info_by_agent[agent_id] = info
         return messages, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(self, agent_id: str | None = None):
         observations, infos = self.env.reset()
-        agent_id = self.env.possible_agents[0] if self.env.possible_agents else None
+        if agent_id is None:
+            agent_id = self.env.possible_agents[0] if self.env.possible_agents else None
         obs_text = observations.get(agent_id, {}).get("prompt", "")
         info = dict(infos.get(agent_id, {}))
         info["agent_id"] = agent_id
@@ -110,6 +132,9 @@ class Env:
         messages = self._build_messages(obs_text, agent_id)
         self.last_msg = messages
         self.last_info = info
+        if agent_id is not None:
+            self.last_msg_by_agent[agent_id] = messages
+            self.last_info_by_agent[agent_id] = info
         return messages, info
 
     def render(self):

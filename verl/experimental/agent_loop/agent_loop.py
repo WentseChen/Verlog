@@ -41,7 +41,7 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.utils.rollout_trace import RolloutTraceConfig, rollout_trace_attr, rollout_trace_op
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
-from verl.envs.env import Env
+from verl.envs.env_2 import Env
 from verl.envs.environments import make_env
 from verl.envs.captioners import make_captioner
 
@@ -180,6 +180,10 @@ class AgentLoopOutput(BaseModel):
     """Whether the episode is done, for RL agent loop."""
     env_idx: int = 0
     """Index of environment, for multi-env agent loop."""
+    agent_id: Optional[str] = None
+    """Agent id for multi-agent agent loop."""
+    turn_id: int = 0
+    """Turn index within an episode."""
 
 
 class _InternalAgentLoopOutput(AgentLoopOutput):
@@ -211,6 +215,10 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Whether the episode is done, for RL agent loop."""
     env_idx: int = 0
     """Index of environment, for multi-env agent loop."""
+    agent_id: Optional[str] = None
+    """Agent id for multi-agent agent loop."""
+    turn_id: int = 0
+    """Turn index within an episode."""
 
 
 # make hydra.utils.instantiate happy
@@ -719,6 +727,8 @@ class AgentLoopWorker:
                     rewards=output.rewards,
                     done=output.done,
                     env_idx=env_idx,
+                    agent_id=output.agent_id,
+                    turn_id=output.turn_id,
                 )
                 new_outputs.append(new_output)
             
@@ -766,6 +776,8 @@ class AgentLoopWorker:
         non_tensor_batch = {
             "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
             "env_idx": np.array([input.env_idx for input in inputs], dtype=np.int32),
+            "turn_id": np.array([input.turn_id for input in inputs], dtype=np.int32),
+            "agent_id": np.array([input.agent_id for input in inputs], dtype=object),
         }
 
         # add reward_extra_info to non_tensor_batch
