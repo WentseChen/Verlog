@@ -140,10 +140,15 @@ class ToolAgentLoop(AgentLoopBase):
     @rollout_trace_op
     async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool, **kwargs) -> List[AgentLoopOutput]:
 
+        agent_id = kwargs.get("agent_id")
         if is_val:
-            messages, info = env.reset()
+            messages, info = env.reset(agent_id=agent_id)
         else:
-            messages, info = env.get_last_obs()
+            messages, info = env.get_last_obs(agent_id=agent_id)
+            if not messages:
+                messages, info = env.reset(agent_id=agent_id)
+        if info and info.get("agent_id") is not None:
+            agent_id = info.get("agent_id")
             
         metrics = {}
         request_id = uuid4().hex
@@ -190,6 +195,8 @@ class ToolAgentLoop(AgentLoopBase):
                 None,
                 lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
             )
+            if agent_id is not None:
+                actions = {agent_id: actions}
             
             last_prompt_ids = copy.deepcopy(prompt_ids)
             is_full = await counter.is_full.remote()
@@ -200,6 +207,8 @@ class ToolAgentLoop(AgentLoopBase):
             observation = copy.deepcopy(messages)
             
             messages, reward, terminated, truncated, info = env.step(actions)
+            if info and info.get("agent_id") is not None:
+                agent_id = info.get("agent_id")
             done = np.logical_or(terminated, truncated)
             
             # Detect loop: check if the observation contains a hint (for both val and training)
@@ -225,6 +234,8 @@ class ToolAgentLoop(AgentLoopBase):
                 done=done,
                 num_turns=num_turns,
                 env_idx=env_idx,
+                agent_id=agent_id,
+                turn_id=num_turns,
             )
             num_turns += 1
             
@@ -259,6 +270,8 @@ class ToolAgentLoop(AgentLoopBase):
             done=True,
             num_turns=num_turns,
             env_idx=env_idx,
+            agent_id=agent_id,
+            turn_id=num_turns,
         )
         outputs.append(turn_data)
         

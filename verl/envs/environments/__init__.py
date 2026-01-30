@@ -15,7 +15,7 @@ def make_env(env_name, task, config, render_mode=None):
         render_mode (str, optional): Rendering mode for the environment. Defaults to None.
 
     Returns:
-        EnvWrapper: A wrapped environment instance.
+        EnvWrapper: A wrapped environment instance (or raw env for dummy_openai).
 
     Raises:
         ValueError: If the environment name is not recognized.
@@ -42,6 +42,17 @@ def make_env(env_name, task, config, render_mode=None):
     elif env_name == "babaisai":
         from verl.envs.environments.babaisai.babaisai_env import make_babaisai_env
         base_env = make_babaisai_env(env_name, task, config, render_mode=render_mode)
+    elif env_name == "dummy_openai":
+        from verl.envs.environments.dummy_openai_env import DummyOpenAIEnv
+
+        dummy_prompt = getattr(config.envs, "dummy_prompt", "what's 1+1?")
+        return DummyOpenAIEnv(prompt=dummy_prompt)
+    elif env_name == "dummy_openai_multi":
+        from verl.envs.environments.dummy_openai_multi_env import DummyOpenAIMultiEnv
+
+        dummy_prompt = getattr(config.envs, "dummy_prompt", "what's 1+1?")
+        num_agents = getattr(config.envs, "dummy_num_agents", 2)
+        return DummyOpenAIMultiEnv(prompt=dummy_prompt, num_agents=num_agents)
     else:
         raise ValueError(f"Unknown environment: {env_name}")
     

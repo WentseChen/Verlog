@@ -78,6 +78,50 @@ def get_episode_structure(episode_idx: np.ndarray):
         episodes.append(indices)
     return episodes
 
+def get_multiagent_episode_structure(episode_idx: np.ndarray, agent_id: np.ndarray, turn_id: np.ndarray):
+    """
+    Group indices by (episode_idx, agent_id), ordering within each group by turn_id then index.
+    """
+    episodes = []
+    groups = defaultdict(list)
+    for i, (env_i, agent_i) in enumerate(zip(episode_idx, agent_id)):
+        env_key = int(env_i) if isinstance(env_i, np.generic) else env_i
+        groups[(env_key, agent_i)].append(i)
+    for indices in groups.values():
+        idx_arr = np.array(indices, dtype=np.int32)
+        order = np.lexsort((idx_arr, turn_id[idx_arr]))
+        episodes.append(idx_arr[order].tolist())
+    return episodes
+
+def remove_last_turn_in_episode_multiagent(batch: DataProto) -> DataProto:
+    """
+    Remove the last index from each (env_idx, agent_id) group, using turn_id.
+    """
+    env_idx = batch.non_tensor_batch["env_idx"]
+    agent_id = batch.non_tensor_batch["agent_id"]
+    turn_id = batch.non_tensor_batch["turn_id"]
+
+    groups = defaultdict(list)
+    for i, (env_i, agent_i) in enumerate(zip(env_idx, agent_id)):
+        env_key = int(env_i) if isinstance(env_i, np.generic) else env_i
+        groups[(env_key, agent_i)].append(i)
+    last_indices = []
+    for indices in groups.values():
+        idx_arr = np.array(indices, dtype=np.int32)
+        max_turn = turn_id[idx_arr].max()
+        max_indices = idx_arr[turn_id[idx_arr] == max_turn]
+        last_indices.append(int(max_indices[-1]))
+
+    all_indices = list(range(len(env_idx)))
+    keep_indices = [i for i in all_indices if i not in set(last_indices)]
+    return batch.select_idxs(keep_indices)
+
+def _has_agent_id(non_tensor_batch: dict) -> bool:
+    agent_id = non_tensor_batch.get("agent_id")
+    if agent_id is None:
+        return False
+    return any(a is not None for a in agent_id)
+
 def remove_last_turn_in_episode(batch: DataProto) -> DataProto:
     """
     Remove the last index from each episode group.
@@ -251,7 +295,14 @@ def compute_advantage(
     if adv_estimator == AdvantageEstimator.GAE:
         # Compute advantages and returns using Generalized Advantage Estimation (GAE)
         episode_idx = data.non_tensor_batch["env_idx"]
-        episode_structure = get_episode_structure(episode_idx)
+        if _has_agent_id(data.non_tensor_batch) and "turn_id" in data.non_tensor_batch:
+            episode_structure = get_multiagent_episode_structure(
+                episode_idx,
+                data.non_tensor_batch["agent_id"],
+                data.non_tensor_batch["turn_id"],
+            )
+        else:
+            episode_structure = get_episode_structure(episode_idx)
         advantages, returns = core_algos.compute_gae_advantage_return(
             token_level_rewards=data.batch["token_level_rewards"],
             values=data.batch["values"],
@@ -628,9 +679,24 @@ class RayPPOTrainer:
 
             # store the reward of the last turn in each trajectory
             env_idx = test_output_gen_batch_padded.non_tensor_batch['env_idx']
-            unique_envs = np.unique(env_idx)
-            last_positions = [np.where(env_idx == uni_env)[0][-1] for uni_env in unique_envs]
-            last_positions = np.array(last_positions)
+            if _has_agent_id(test_output_gen_batch_padded.non_tensor_batch) and "turn_id" in test_output_gen_batch_padded.non_tensor_batch:
+                agent_id = test_output_gen_batch_padded.non_tensor_batch["agent_id"]
+                turn_id = test_output_gen_batch_padded.non_tensor_batch["turn_id"]
+                groups = defaultdict(list)
+                for i, (env_i, agent_i) in enumerate(zip(env_idx, agent_id)):
+                    env_key = int(env_i) if isinstance(env_i, np.generic) else env_i
+                    groups[(env_key, agent_i)].append(i)
+                last_positions = []
+                for indices in groups.values():
+                    idx_arr = np.array(indices, dtype=np.int32)
+                    max_turn = turn_id[idx_arr].max()
+                    max_indices = idx_arr[turn_id[idx_arr] == max_turn]
+                    last_positions.append(int(max_indices[-1]))
+                last_positions = np.array(last_positions, dtype=np.int32)
+            else:
+                unique_envs = np.unique(env_idx)
+                last_positions = [np.where(env_idx == uni_env)[0][-1] for uni_env in unique_envs]
+                last_positions = np.array(last_positions)
             val_rewards = test_output_gen_batch_padded.batch["rewards"][last_positions]
             val_traj_len = test_output_gen_batch_padded.non_tensor_batch['__num_turns__'][last_positions] + 1
             
@@ -1277,7 +1343,10 @@ class RayPPOTrainer:
                         )
                     
                     # the last turn for each episode (parallel environment) is only used for bootstrapping the value,
-                    batch4train = remove_last_turn_in_episode(batch)
+                    if _has_agent_id(batch.non_tensor_batch) and "turn_id" in batch.non_tensor_batch:
+                        batch4train = remove_last_turn_in_episode_multiagent(batch)
+                    else:
+                        batch4train = remove_last_turn_in_episode(batch)
                     # from step 2 to step `critic_warmup`, we only update the critic, and only use part of the batch
                     if self.config.trainer.critic_warmup >= self.global_steps:
                         ratio = self.config.trainer.critic_warmup_batch_divide_ratio
