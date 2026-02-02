@@ -257,24 +257,66 @@ class ToolAgentLoop(AgentLoopBase):
             
             is_full = await counter.increment.remote()
             if is_full and not is_val:
-                break # will discard the last turn data
+                # Buffer is full - create bootstrap turns for ALL agents in multi-agent setup
+                # Get list of all agents from environment
+                possible_agents = (
+                    getattr(env, "possible_agents", None)
+                    or getattr(getattr(env, "env", None), "possible_agents", None)
+                )
+
+                if possible_agents:
+                    # Multi-agent: create bootstrap turn for each agent
+                    for bootstrap_agent_id in possible_agents:
+                        bootstrap_turn = AgentLoopOutput(
+                            prompt_ids=last_prompt_ids,
+                            response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
+                            response_mask=[1],
+                            metrics=dict(),
+                            rewards=0.0,  # Bootstrap turn doesn't carry reward
+                            done=True,
+                            num_turns=num_turns,
+                            env_idx=env_idx,
+                            agent_id=bootstrap_agent_id,  # Set correct agent_id per bootstrap
+                            turn_id=num_turns,  # Bootstrap turn_id
+                        )
+                        outputs.append(bootstrap_turn)
+                else:
+                    # Single-agent: create one bootstrap turn
+                    bootstrap_turn = AgentLoopOutput(
+                        prompt_ids=last_prompt_ids,
+                        response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
+                        response_mask=[1],
+                        metrics=dict(),
+                        rewards=0.0,
+                        done=True,
+                        num_turns=num_turns,
+                        env_idx=env_idx,
+                        agent_id=agent_id,
+                        turn_id=num_turns,
+                    )
+                    outputs.append(bootstrap_turn)
+                break  # Exit loop after buffer truncation
             else:
+                # Buffer not full or validation - append normal turn and continue
                 outputs.append(turn_data)
-            
-        turn_data = AgentLoopOutput(
-            prompt_ids=last_prompt_ids,
-            response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
-            response_mask=[1],
-            metrics=dict(),
-            rewards=reward if is_val else 0.0,
-            done=True,
-            num_turns=num_turns,
-            env_idx=env_idx,
-            agent_id=agent_id,
-            turn_id=num_turns,
-        )
-        outputs.append(turn_data)
-        
+
+        # Episode completed naturally (not truncated) - add final bootstrap turn
+        # This happens when done=True from environment termination
+        if not (is_full and not is_val):
+            bootstrap_turn = AgentLoopOutput(
+                prompt_ids=last_prompt_ids,
+                response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
+                response_mask=[1],
+                metrics=dict(),
+                rewards=reward if is_val else 0.0,
+                done=True,
+                num_turns=num_turns,
+                env_idx=env_idx,
+                agent_id=agent_id,
+                turn_id=num_turns,
+            )
+            outputs.append(bootstrap_turn)
+
         return outputs
 
     @classmethod
