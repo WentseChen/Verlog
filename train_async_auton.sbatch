@@ -11,9 +11,8 @@
 #SBATCH --time=01:00:00
 #SBATCH --gpus-per-node=4
 
-source /home/scratch/cpulling/miniconda3/envs/verlog
-conda init
-conda activate verlog
+source /zfsauton2/home/ajseo/miniconda3/bin/activate
+conda activate /home/scratch/cpulling/miniconda3/envs/verlog
 cd /zfsauton2/home/ajseo/Verlog
 
 ulimit -n 65535
@@ -54,7 +53,7 @@ export WANDB_API_KEY=5cd6b6564c0f79ebf65ce694e5e3b54b725ff225
 python3 -m verl.trainer.main_ppo \
     --config-path="$CONFIG_PATH" \
     --config-name='gsm8k_multiturn_grpo' \
-    #'hydra.run.dir=/work/nvme/bfoz/aseo/verl_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}' \
+    'hydra.run.dir=/zfsauton2/home/ajseo/verl_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}' \
     algorithm.adv_estimator=gae \
     data.train_batch_size=${BATCH_SIZE} \
     data.max_prompt_length=512 \
