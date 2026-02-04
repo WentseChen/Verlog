@@ -53,6 +53,11 @@ def make_env(env_name, task, config, render_mode=None):
         dummy_prompt = getattr(config.envs, "dummy_prompt", "what's 1+1?")
         num_agents = getattr(config.envs, "dummy_num_agents", 2)
         return DummyOpenAIMultiEnv(prompt=dummy_prompt, num_agents=num_agents)
+    elif env_name == "async_ticker_admissions":
+        from verl.envs.async_ticker_env import AsyncTickerAdmissionsEnv
+
+        env_config = getattr(config.envs, "env_config", config.envs)
+        return AsyncTickerAdmissionsEnv(env_config)
     else:
         raise ValueError(f"Unknown environment: {env_name}")
     
