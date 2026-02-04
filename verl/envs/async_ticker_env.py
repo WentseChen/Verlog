@@ -96,7 +96,7 @@ class AsyncTickerAdmissionsEnv(gym.Env):
 
         return observations, infos
 
-    def step(self, action: str) -> Tuple[Dict[str, str], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Dict]]:
+    def step(self, action: str | Dict[str, Any]) -> Tuple[Dict[str, str], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Dict]]:
         """
         Execute one step with active agent's action.
 
@@ -109,11 +109,24 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         """
         active_agent = self.episode_state["active_agent"]
 
+        action_text = action
+        if isinstance(action, dict):
+            if active_agent in action:
+                action_text = action.get(active_agent, "")
+            elif len(action) == 1:
+                action_text = next(iter(action.values()))
+            else:
+                action_text = ""
+        if action_text is None:
+            action_text = ""
+        if not isinstance(action_text, str):
+            action_text = str(action_text)
+
         # Parse action
-        parsed = self._parse_action(action)
+        parsed = self._parse_action(action_text)
 
         # Count tokens
-        token_count = self._count_tokens(action)
+        token_count = self._count_tokens(action_text)
 
         # Update active agent's ticker
         old_ticker = self.episode_state["agent_tickers"][active_agent]
@@ -123,7 +136,7 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         # Add message to history
         message = {
             "agent_id": active_agent,
-            "text": action,
+            "text": action_text,
             "ticker_time": new_ticker,
             "token_count": token_count,
             "message_type": parsed["type"]
