@@ -111,6 +111,7 @@ python3 -m verl.trainer.main_ppo \
     critic.model.use_remove_padding=True \
     critic.model.path=Qwen/Qwen3-0.6B \
     critic.model.enable_gradient_checkpointing=True \
+    critic.model.enable_gradient_checkpointing=True \
     critic.ppo_epochs=${PPO_EPOCHS} \
     critic.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
     critic.ppo_mini_batch_size=${MINI_BATCH_SIZE} \
@@ -119,6 +120,8 @@ python3 -m verl.trainer.main_ppo \
     critic.ppo_max_token_len_per_gpu=256 \
     critic.forward_max_token_len_per_gpu=256 \
     critic.forward_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
+    data.train_files=$HOME/data/gsm8k/test.parquet \
+    data.val_files=$HOME/data/gsm8k/test.parquet \
     data.train_files=$HOME/data/gsm8k/test.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
     $@
