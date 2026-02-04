@@ -13,6 +13,8 @@
 
 source /zfsauton2/home/ajseo/miniconda3/bin/activate
 conda activate /home/scratch/cpulling/miniconda3/envs/verlog
+pip install "ray[default]"
+
 cd /zfsauton2/home/ajseo/Verlog
 
 ulimit -n 65535
@@ -23,7 +25,7 @@ export RAY_NUM_CPUS=16
 export RAY_INCLUDE_DASHBOARD=0
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
-#export RAY_DISABLE_DASHBOARD=1
+export RAY_DISABLE_DASHBOARD=1
 export PYTHONNOUSERSITE=1
 
 NUM_GPUS_PER_NODE=1
@@ -33,9 +35,9 @@ export CUDA_VISIBLE_DEVICES=0
 export HF_HOME="/zfsauton2/home/ajseo/models_cache"
 mkdir -p "$HF_HOME"
 
-#export TMPDIR="/work/nvme/bfoz/aseo/tmp"
-#export RAY_TMPDIR="$TMPDIR"
-#mkdir -p "$TMPDIR"
+export TMPDIR="/tmp/ajseo"
+export RAY_TMPDIR="$TMPDIR"
+mkdir -p "$TMPDIR"
 
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
