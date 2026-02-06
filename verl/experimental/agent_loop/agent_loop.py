@@ -45,37 +45,44 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 @ray.remote
-class Counter:
+class DataBuffer:
+    """Data buffer shared by all agent loop workers to store and retrieve data points."""
+    
     def __init__(self):
-        """
-        global counter shared by all parallel environments
-        Count the number of turns that have been processed, stop rollout when num_turns >= batch_size
-        """
-        self.num_turns = 0
-        self.batch_size = 0
+        """Initialize the data buffer."""
+        self._queue = queue.Queue()
         self.lock = asyncio.Lock()
-
-    async def increment(self, n=1):
-        """Increment counter by n in a thread-safe manner."""
-        async with self.lock:
-            self.num_turns += n
-            return self.num_turns > self.batch_size 
-
-    async def reset(self, batch_size):
-        """Reset counter to 0 in a thread-safe manner."""
-        async with self.lock:
-            self.batch_size = batch_size
-            self.num_turns = 0
-            
-    async def get_batch_size(self):
-        """Get current batch size."""
-        async with self.lock:
-            return self.batch_size
+    
+    async def reset(self, prompts: DataProto):
+        """Reset the data buffer by putting all prompts into the buffer.
         
-    async def is_full(self):
-        """Get current number of turns."""
+        Args:
+            prompts (DataProto): Input prompts to be stored in the buffer.
+        """
         async with self.lock:
-            return self.num_turns >= self.batch_size
+            # Clear existing items
+            while not self._queue.empty():
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
+            
+            # Add all items from prompts
+            for i in range(len(prompts)):
+                data_item = prompts[i]
+                self._queue.put(data_item)
+    
+    async def pop(self):
+        """Pop one data point from the buffer.
+        
+        Returns:
+            DataProtoItem or None: A data point from the buffer, or None if the buffer is empty.
+        """
+        async with self.lock:
+            try:
+                return self._queue.get_nowait()
+            except queue.Empty:
+                return None
 
 class AsyncLLMServerManager:
     """
@@ -467,18 +474,19 @@ class AgentLoopWorker:
         )
         
         from verl.envs.env import get_balrog_env as make_env
+        from verl.envs.sp_env import get_mmlu_env as make_sp_env
         
-        self.env = make_env(self.config)
-        self.env.reset()
+        self.env = make_sp_env(self.config)
         
-        self.val_env = make_env(self.config)
-        self.val_env.reset()
+        self.val_env = make_sp_env(self.config)
 
-    async def generate_sequences(self, batch: DataProto, counter, env_idx: int) -> DataProto:
+    async def generate_sequences(self, batch: DataProto, data_buffer, env_idx: int) -> DataProto:
         """Generate sequences from agent loop.
 
         Args:
             batch (DataProto): Input batch.
+            data_buffer: Data buffer for storing prompts.
+            env_idx (int): Environment index.
 
         Returns:
             DataProto: Output batch.
@@ -526,7 +534,7 @@ class AgentLoopWorker:
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             is_val = batch.meta_info.get("validate", False)
-            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], counter, env_idx, is_val, **kwargs)))
+            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], data_buffer, env_idx, is_val, **kwargs)))
         outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(outputs[0])
@@ -536,7 +544,7 @@ class AgentLoopWorker:
         self,
         sampling_params: dict[str, Any],
         trajectory: dict[str, Any],
-        counter,
+        data_buffer,
         env_idx: int,
         is_val: bool,
         *,
@@ -563,7 +571,7 @@ class AgentLoopWorker:
                 processor=self.processor,
             )
             env = self.val_env if is_val else self.env
-            outputs: AgentLoopOutput = await agent_loop.run(env, counter, env_idx, sampling_params, is_val, **kwargs)
+            outputs: AgentLoopOutput = await agent_loop.run(env, data_buffer, env_idx, sampling_params, is_val, **kwargs)
 
             # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
 
@@ -862,7 +870,7 @@ class AgentLoopManager:
         if self.config.actor_rollout_ref.rollout.free_cache_engine:
             self.sleep()
         
-        self.counter = Counter.remote()
+        self.data_buffer = DataBuffer.remote()
 
     def _initialize_llm_servers(self):
         rollout_world_size = (
@@ -923,9 +931,8 @@ class AgentLoopManager:
             DataProto: Output batch.
         """
         
-        # the rollout will stop when gen_batch_size is reached
-        gen_batch_size = prompts.meta_info.get("gen_batch_size", len(prompts))
-        ray.get(self.counter.reset.remote(gen_batch_size))
+        # Reset data buffer with all prompts
+        ray.get(self.data_buffer.reset.remote(prompts))
 
         if self.rm_micro_batch_size and len(prompts) % self.rm_micro_batch_size != 0:
             raise ValueError(
@@ -943,7 +950,7 @@ class AgentLoopManager:
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = ray.get(
             [
-                worker.generate_sequences.remote(chunk, self.counter, env_idx)
+                worker.generate_sequences.remote(chunk, self.data_buffer, env_idx)
                 for env_idx, (worker, chunk) in enumerate(zip(self.agent_loop_workers, chunkes, strict=True))
             ]
         )

@@ -109,82 +109,26 @@ class ToolAgentLoop(AgentLoopBase):
         )
 
     @rollout_trace_op
-    async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool, **kwargs) -> List[AgentLoopOutput]:
-
-        if is_val:
-            messages, info = env.reset()
-        else:
-            messages, info = env.get_last_obs()
-            
-        metrics = {}
-        request_id = uuid4().hex
-        
-        prompt_ids = await self.loop.run_in_executor(
-            None,
-            lambda: self.tokenizer.apply_chat_template(
-                messages,
-                tools=self.tool_schemas,
-                add_generation_prompt=True,
-                tokenize=True,
-                **self.apply_chat_template_kwargs,
-            ),
-        )
+    async def run(self, env, data_buffer, env_idx: int, sampling_params: dict[str, Any], is_val: bool, **kwargs) -> List[AgentLoopOutput]:
         
         outputs = []
-        num_turns = 0
-        reward = 0.0
+        last_prompt_ids = None
+        last_info = None
+        
+        total_count = 0
+        
         while True:
-            
-            with simple_timer("generate_sequences", metrics):
-                output = await self.server_manager.generate(
-                    request_id=request_id,
-                    prompt_ids=prompt_ids,
-                    sampling_params=sampling_params,
-                    image_data=None,
-                )
-            
-            # truncate response_ids to response_length
-            response_ids = output.token_ids[: self.response_length]
-            response_mask = [1] * len(response_ids)
-            
-            assert len(prompt_ids) <= self.prompt_length
-            assert len(response_ids) <= self.response_length
-            
-            if output.log_probs:
-                response_logprobs = output.log_probs[: self.response_length]
-            
-            actions = await self.loop.run_in_executor(
-                None,
-                lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
-            )
-            
-            last_prompt_ids = copy.deepcopy(prompt_ids)
-            is_full = await counter.is_full.remote()
-            if is_full and not is_val:
+            # Pop data point from buffer
+            data_point = await data_buffer.pop.remote()
+            if data_point is None:
+                print(f"Total count: {total_count} len(outputs): {len(outputs)}")
                 break
+            total_count += 1
+            # Reset environment with data point as sample
+            messages, info = env.reset(sample=data_point)
             
-            # Store observation before step (always, for loop detection)
-            observation = copy.deepcopy(messages)
-            
-            messages, reward, terminated, truncated, info = env.step(actions)
-            done = np.logical_or(terminated, truncated)
-            
-            if done and is_val:
-                break
-            
-            turn_data = AgentLoopOutput(
-                prompt_ids=prompt_ids,
-                response_ids=response_ids,
-                response_mask=response_mask,
-                response_logprobs=response_logprobs if output.log_probs else None,
-                metrics=metrics,
-                rewards=reward,
-                done=done,
-                num_turns=num_turns,
-                env_idx=env_idx,
-                info=info["metrics"],
-            )
-            num_turns += 1
+            metrics = {}
+            request_id = uuid4().hex
             
             prompt_ids = await self.loop.run_in_executor(
                 None,
@@ -197,13 +141,82 @@ class ToolAgentLoop(AgentLoopBase):
                 ),
             )
             
-            # double check if we have reached max turns
-            is_full = await counter.increment.remote()
-            if is_full and not is_val:
-                break # will discard the last turn data
-            else:
-                outputs.append(turn_data)
+            num_turns = 0
+            reward = 0.0
             
+            # Inner loop for environment steps
+            while True:
+                
+                with simple_timer("generate_sequences", metrics):
+                    output = await self.server_manager.generate(
+                        request_id=request_id,
+                        prompt_ids=prompt_ids,
+                        sampling_params=sampling_params,
+                        image_data=None,
+                    )
+                
+                # truncate response_ids to response_length
+                response_ids = output.token_ids[: self.response_length]
+                response_mask = [1] * len(response_ids)
+                
+                assert len(prompt_ids) <= self.prompt_length
+                assert len(response_ids) <= self.response_length
+                
+                if output.log_probs:
+                    response_logprobs = output.log_probs[: self.response_length]
+                else:
+                    response_logprobs = None
+                
+                actions = await self.loop.run_in_executor(
+                    None,
+                    lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
+                )
+                
+                last_prompt_ids = copy.deepcopy(prompt_ids)
+                last_phase = info.get("phase")
+                
+                assert last_phase in ["dreaming", "answering"], f"last_phase: {last_phase}"
+                assert (num_turns == 0 and last_phase == "dreaming") or (num_turns == 1 and last_phase == "answering"), f"num_turns: {num_turns}, last_phase: {last_phase}"
+                
+                messages, reward, terminated, truncated, info = env.step(actions)
+                done = np.logical_or(terminated, truncated)
+                
+                if last_phase == "dreaming":
+                    turn_data = AgentLoopOutput(
+                        prompt_ids=prompt_ids,
+                        response_ids=response_ids,
+                        response_mask=response_mask,
+                        response_logprobs=response_logprobs,
+                        metrics=metrics,
+                        rewards=reward,
+                        done=done,
+                        num_turns=num_turns,
+                        env_idx=env_idx,
+                        info=info.get("metrics", info),
+                    )
+                    outputs.append(turn_data)
+                else:
+                    outputs[-1].rewards = reward
+                
+                # assert (last_phase == "answering" and done) or (last_phase == "dreaming" and not done)
+                
+                if done:
+                    break
+                
+                num_turns += 1
+                
+                prompt_ids = await self.loop.run_in_executor(
+                    None,
+                    lambda: self.tokenizer.apply_chat_template(
+                        messages,
+                        tools=self.tool_schemas,
+                        add_generation_prompt=True,
+                        tokenize=True,
+                        **self.apply_chat_template_kwargs,
+                    ),
+                )
+            
+        # Add final turn data for this episode
         turn_data = AgentLoopOutput(
             prompt_ids=last_prompt_ids,
             response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
@@ -211,9 +224,9 @@ class ToolAgentLoop(AgentLoopBase):
             metrics=dict(),
             rewards=reward if is_val else 0.0,
             done=True,
-            num_turns=num_turns,
+            num_turns=1,
             env_idx=env_idx,
-            info=info["metrics"],
+            info=dict(), # last_info["metrics"],
         )
         outputs.append(turn_data)
         
