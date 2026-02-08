@@ -319,7 +319,7 @@ def compute_gae_advantage_return(
         advantages = torch.stack(advantages_reversed[::-1], dim=1)
 
         returns = advantages + values
-        advantages = verl_F.masked_whiten(advantages, response_mask)
+        # advantages = verl_F.masked_whiten(advantages, response_mask) # Don't whiten the advantages
     return advantages, returns
 
 

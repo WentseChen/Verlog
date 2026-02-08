@@ -177,9 +177,10 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
     # compute kl between ref_policy and current policy
     # When apply_kl_penalty, algorithm.use_kl_in_reward=True, so the reference model has been enabled.
-    kld = core_algos.kl_penalty(
-        data.batch["old_log_probs"], data.batch["ref_log_prob"], kl_penalty=kl_penalty
-    )  # (batch_size, response_length)
+    kld = -data.batch["ref_log_prob"]
+    # core_algos.kl_penalty(
+    #     data.batch["old_log_probs"], data.batch["ref_log_prob"], kl_penalty=kl_penalty
+    # )  # (batch_size, response_length)
     kld = kld * response_mask
     beta = kl_ctrl.value
 

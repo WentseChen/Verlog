@@ -40,7 +40,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.ppo_epochs=${PPO_EPOCHS} \
-    actor_rollout_ref.actor.entropy_coeff=0.001 \
+    actor_rollout_ref.actor.entropy_coeff=0.1 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=${OFFLOAD} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${OFFLOAD} \
@@ -53,13 +53,14 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=True \
+    algorithm.kl_ctrl.kl_coef=0.1 \
     trainer.balance_batch=False \
     trainer.critic_warmup=0 \
     trainer.critic_warmup_batch_repeat_times=1 \
     trainer.critic_warmup_batch_divide_ratio=1 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='zero' \
-    trainer.experiment_name='ppo_epoch' \
+    trainer.experiment_name='debug' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \

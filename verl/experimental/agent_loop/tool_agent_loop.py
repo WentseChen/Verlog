@@ -115,15 +115,11 @@ class ToolAgentLoop(AgentLoopBase):
         last_prompt_ids = None
         last_info = None
         
-        total_count = 0
-        
         while True:
             # Pop data point from buffer
             data_point = await data_buffer.pop.remote()
             if data_point is None:
-                print(f"Total count: {total_count} len(outputs): {len(outputs)}")
                 break
-            total_count += 1
             # Reset environment with data point as sample
             messages, info = env.reset(sample=data_point)
             
@@ -147,11 +143,16 @@ class ToolAgentLoop(AgentLoopBase):
             # Inner loop for environment steps
             while True:
                 
+                # Ensure logprobs is enabled to get log probabilities
+                sampling_params_with_logprobs = copy.deepcopy(sampling_params)
+                if info.get("phase") == "answering":
+                    sampling_params_with_logprobs["logprobs"] = True
+                
                 with simple_timer("generate_sequences", metrics):
                     output = await self.server_manager.generate(
                         request_id=request_id,
                         prompt_ids=prompt_ids,
-                        sampling_params=sampling_params,
+                        sampling_params=sampling_params_with_logprobs,
                         image_data=None,
                     )
                 
@@ -174,14 +175,21 @@ class ToolAgentLoop(AgentLoopBase):
                 
                 last_prompt_ids = copy.deepcopy(prompt_ids)
                 last_phase = info.get("phase")
-                
-                assert last_phase in ["dreaming", "answering"], f"last_phase: {last_phase}"
-                assert (num_turns == 0 and last_phase == "dreaming") or (num_turns == 1 and last_phase == "answering"), f"num_turns: {num_turns}, last_phase: {last_phase}"
+                last_info = copy.deepcopy(info)
                 
                 messages, reward, terminated, truncated, info = env.step(actions)
                 done = np.logical_or(terminated, truncated)
                 
-                if last_phase == "dreaming":
+                # Check if we're in the answering phase
+                if last_phase == "answering":
+                    if response_logprobs is not None and len(response_logprobs) > 0:
+                        avg_log_prob = np.mean(response_logprobs)
+                        prob = np.exp(avg_log_prob)
+                        adjusted_reward = reward * avg_log_prob / prob
+                        adjusted_reward = np.clip(adjusted_reward, -5.0, 5.0)
+                        reward = adjusted_reward
+                    outputs[-1].rewards = reward
+                else:
                     turn_data = AgentLoopOutput(
                         prompt_ids=prompt_ids,
                         response_ids=response_ids,
@@ -189,16 +197,12 @@ class ToolAgentLoop(AgentLoopBase):
                         response_logprobs=response_logprobs,
                         metrics=metrics,
                         rewards=reward,
-                        done=done,
+                        done=True,
                         num_turns=num_turns,
                         env_idx=env_idx,
                         info=info.get("metrics", info),
                     )
                     outputs.append(turn_data)
-                else:
-                    outputs[-1].rewards = reward
-                
-                # assert (last_phase == "answering" and done) or (last_phase == "dreaming" and not done)
                 
                 if done:
                     break
@@ -226,7 +230,7 @@ class ToolAgentLoop(AgentLoopBase):
             done=True,
             num_turns=1,
             env_idx=env_idx,
-            info=dict(), # last_info["metrics"],
+            info=last_info["metrics"],
         )
         outputs.append(turn_data)
         
