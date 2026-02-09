@@ -177,10 +177,9 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
     # compute kl between ref_policy and current policy
     # When apply_kl_penalty, algorithm.use_kl_in_reward=True, so the reference model has been enabled.
-    kld = -data.batch["ref_log_prob"]
-    # core_algos.kl_penalty(
-    #     data.batch["old_log_probs"], data.batch["ref_log_prob"], kl_penalty=kl_penalty
-    # )  # (batch_size, response_length)
+    kld = core_algos.kl_penalty(
+        data.batch["old_log_probs"], data.batch["ref_log_prob"], kl_penalty=kl_penalty
+    )  # (batch_size, response_length)
     kld = kld * response_mask
     beta = kl_ctrl.value
 
@@ -1106,11 +1105,6 @@ class RayPPOTrainer:
                 batch.non_tensor_batch["uid"] = np.array(
                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                 )
-                
-                # use larger batch size for better critic training
-                if self.config.trainer.critic_warmup >= self.global_steps:
-                    repeat_time = self.config.trainer.critic_warmup_batch_repeat_times
-                    batch = batch.repeat(repeat_times=repeat_time)
 
                 gen_batch = self._get_gen_batch(batch)
                 # store s_{T+1} of each episode for bootstrapping
@@ -1128,24 +1122,18 @@ class RayPPOTrainer:
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     
-                    # skip rollout from step 2 to step `critic_warmup`
-                    is_first_step = self.global_steps == 1
-                    is_warmup = self.config.trainer.critic_warmup >= self.global_steps
-                    
-                    if not is_warmup or is_first_step:
-                    
-                        # generate a batch
-                        with marked_timer("gen", timing_raw, color="red"):
-                            if not self.async_rollout_mode:
-                                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                            else:
-                                gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+                    # generate a batch
+                    with marked_timer("gen", timing_raw, color="red"):
+                        if not self.async_rollout_mode:
+                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        else:
+                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
 
-                            timing_raw.update(gen_batch_output.meta_info["timing"])
-                            gen_batch_output.meta_info.pop("timing", None)
-                            
-                            metrics.update(gen_batch_output.meta_info["env_infos"])
-                            gen_batch_output.meta_info.pop("env_infos", None)
+                        timing_raw.update(gen_batch_output.meta_info["timing"])
+                        gen_batch_output.meta_info.pop("timing", None)
+                        
+                        metrics.update(gen_batch_output.meta_info["env_infos"])
+                        gen_batch_output.meta_info.pop("env_infos", None)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         if self.reward_fn is None:
@@ -1281,12 +1269,6 @@ class RayPPOTrainer:
                     
                     # the last turn for each episode (parallel environment) is only used for bootstrapping the value,
                     batch4train = remove_last_turn_in_episode(batch)
-                    # from step 2 to step `critic_warmup`, we only update the critic, and only use part of the batch
-                    if self.config.trainer.critic_warmup >= self.global_steps:
-                        ratio = self.config.trainer.critic_warmup_batch_divide_ratio
-                        num_indices = max(1, int(len(batch4train) / ratio))
-                        indices_to_keep = torch.randperm(len(batch4train))[:num_indices]
-                        batch4train = batch4train.select_idxs(indices_to_keep)
 
                     # update critic
                     if self.use_critic:

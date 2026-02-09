@@ -1,3 +1,15 @@
+#!/bin/bash
+#SBATCH --job-name=sp
+#SBATCH --output=logs/slurm-%j.out
+#SBATCH --error=logs/slurm-%j.err
+#SBATCH --mem=240G
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --partition=gpuA100x4
+#SBATCH --account=bfoz-delta-gpu
+#SBATCH --time=47:59:59
+#SBATCH --gpus-per-node=4
 
 source /u/wchen11/anaconda3/bin/activate 
 conda activate verlog
@@ -11,6 +23,7 @@ export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS_PER_NODE-1)))
 
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
+MODEL_PATH="Qwen/Qwen2.5-3B-Instruct"
 
 NUM_ENVS=32
 BATCH_SIZE=256
@@ -27,20 +40,20 @@ python3 -m verl.trainer.main_ppo \
     --config-name='gsm8k_multiturn_grpo' \
     algorithm.adv_estimator=gae \
     data.train_batch_size=${BATCH_SIZE} \
-    data.max_prompt_length=1024 \
-    data.max_response_length=512 \
+    data.max_prompt_length=3072 \
+    data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
     actor_rollout_ref.rollout.mode=async \
-    actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct \
+    actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=${MINI_BATCH_SIZE} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.ppo_epochs=${PPO_EPOCHS} \
-    actor_rollout_ref.actor.entropy_coeff=0.1 \
+    actor_rollout_ref.actor.entropy_coeff=0.0 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=${OFFLOAD} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${OFFLOAD} \
@@ -55,12 +68,12 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=True \
     algorithm.kl_ctrl.kl_coef=0.1 \
     trainer.balance_batch=False \
-    trainer.critic_warmup=0 \
+    trainer.critic_warmup=10 \
     trainer.critic_warmup_batch_repeat_times=1 \
     trainer.critic_warmup_batch_divide_ratio=1 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='zero' \
-    trainer.experiment_name='debug' \
+    trainer.experiment_name='debug_sp' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
@@ -75,7 +88,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
-    critic.model.path=Qwen/Qwen2.5-0.5B-Instruct \
+    critic.model.path=${MODEL_PATH} \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_epochs=${PPO_EPOCHS} \
     critic.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
@@ -85,8 +98,9 @@ python3 -m verl.trainer.main_ppo \
     critic.ppo_max_token_len_per_gpu=8192 \
     critic.forward_max_token_len_per_gpu=8192 \
     critic.forward_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
-    data.train_files=$HOME/data/gsm8k/test.parquet \
-    data.val_files=$HOME/data/gsm8k/test.parquet \
+    data.train_files=$HOME/data/mmlu/test.parquet \
+    data.val_files=$HOME/data/mmlu/test.parquet \
+    data.val_batch_size=${BATCH_SIZE} \
     $@
 
 

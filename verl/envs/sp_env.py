@@ -109,8 +109,6 @@ class MMLUEnv(gym.Env):
             self.current_sample['choices']['text']
         )])
 
-        # --- MODIFIED: Dreamer Prompt for MMLU ---
-        # 针对 MMLU 的 Prompt 修改：强调专业领域知识 (Domain Expertise)
         messages = [
             {
                 "role": "system",
