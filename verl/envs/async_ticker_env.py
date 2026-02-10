@@ -24,6 +24,9 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         self.vote_threshold = config.get("vote_threshold", 0.5)
         self.seed_value = config.get("seed", None)
 
+        # Multi-agent support: possible_agents attribute
+        self.possible_agents = self.professor_ids
+
         # Episode state (initialized in reset)
         self.episode_state = None
         self.student_batch = None
@@ -33,8 +36,8 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         if self.seed_value is not None:
             np.random.seed(self.seed_value)
 
-    def reset(self) -> Tuple[str, Dict]:
-        """Reset environment and return first observation."""
+    def reset(self) -> Tuple[Dict[str, str], Dict[str, Dict]]:
+        """Reset environment and return dict observations and infos for all agents."""
         # Initialize episode state
         self.episode_state = {
             "agent_tickers": {agent_id: 0 for agent_id in self.professor_ids},
@@ -72,11 +75,15 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         active_agent = min(self.professor_ids)
         self.episode_state["active_agent"] = active_agent
 
-        # Build observation for first agent
-        obs = self._build_observation(active_agent)
+        # Build observation for active agent
+        obs_text = self._build_observation(active_agent)
 
-        # Build info dict
-        info = {
+        # Build observations dict (only active agent gets observation)
+        observations = {agent_id: obs_text if agent_id == active_agent else ""
+                       for agent_id in self.professor_ids}
+
+        # Build info dict for all agents
+        base_info = {
             "active_agent": active_agent,
             "agent_idx": self.professor_ids.index(active_agent),
             "episode_state": self.episode_state.copy(),
@@ -85,18 +92,20 @@ class AsyncTickerAdmissionsEnv(gym.Env):
             "professor_interests": self.professor_interests,
         }
 
-        return obs, info
+        infos = {agent_id: base_info.copy() for agent_id in self.professor_ids}
 
-    def step(self, action: str) -> Tuple[str, float, bool, bool, Dict]:
+        return observations, infos
+
+    def step(self, action: str) -> Tuple[Dict[str, str], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Dict]]:
         """
         Execute one step with active agent's action.
 
         Returns:
-            obs: Observation for next agent
-            reward: Reward (0 until done, then agent-specific)
-            done: Whether episode finished
-            truncated: Always False
-            info: Episode state and metadata
+            observations: Dict mapping agent_id to observation string
+            rewards: Dict mapping agent_id to reward value
+            terminations: Dict mapping agent_id to termination bool
+            truncations: Dict mapping agent_id to truncation bool (always False)
+            infos: Dict mapping agent_id to info dict
         """
         active_agent = self.episode_state["active_agent"]
 
@@ -168,7 +177,7 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         self.episode_state["active_agent"] = next_agent
 
         # Build observation for next agent
-        obs = self._build_observation(next_agent)
+        obs_text = self._build_observation(next_agent)
 
         # Calculate rewards if episode done
         if done:
@@ -176,8 +185,8 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         else:
             agent_rewards = {agent_id: 0.0 for agent_id in self.professor_ids}
 
-        # Build info dict
-        info = {
+        # Build base info dict
+        base_info = {
             "active_agent": next_agent,
             "agent_idx": self.professor_ids.index(next_agent),
             "episode_state": self.episode_state.copy(),
@@ -186,10 +195,15 @@ class AsyncTickerAdmissionsEnv(gym.Env):
             "professor_interests": self.professor_interests,
         }
 
-        # Reward is 0 until episode done
-        reward = 0.0
+        # Build multi-agent return dicts
+        observations = {agent_id: obs_text if agent_id == next_agent else ""
+                       for agent_id in self.professor_ids}
+        rewards = {agent_id: agent_rewards[agent_id] for agent_id in self.professor_ids}
+        terminations = {agent_id: done for agent_id in self.professor_ids}
+        truncations = {agent_id: False for agent_id in self.professor_ids}
+        infos = {agent_id: base_info.copy() for agent_id in self.professor_ids}
 
-        return obs, reward, done, False, info
+        return observations, rewards, terminations, truncations, infos
 
     def _build_observation(self, agent_id: str) -> str:
         """
