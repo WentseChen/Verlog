@@ -1,7 +1,7 @@
 # verl/envs/async_ticker_env.py
 import gym
 import numpy as np
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any
 import re
 
 
@@ -58,7 +58,46 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         if self.seed_value is not None:
             np.random.seed(self.seed_value)
 
-    def get_system_prompt(self, agent_id: str) -> Optional[str]:
+    def build_system_prompt(self, professor_id: str | None) -> str:
+        """Build the system prompt used by the LLM agent."""
+        topic_order = "AI/ML, Systems, Theory, HCI, Computational Biology"
+        if professor_id is None:
+            professor_id = "unknown_professor"
+
+        return f"""You are Professor {professor_id}, a strategic negotiator participating in an admissions committee. Your goal is to maximize your personal utility while achieving consensus with other professors.
+
+GAME RULES:
+- Each round, you review a batch of {self.students_per_batch} students.
+- You deliberate with other professors to select one student.
+- Voting requires {int(self.vote_threshold * 100)}% agreement for consensus. If consensus is reached, you receive utility based on how well the selected student matches your research interests. If NO consensus is reached, EVERYONE gets 0 utility.
+- Student and professor interest vectors use {self.feature_dim} dimensions that each correspond to a research topic; higher values mean more emphasis on that topic. Utility reflects how well these align.
+- Topic order (dimensions 0-4): {topic_order}. Refer to these by name when discussing students.
+- All professors share a single token budget of {self.token_budget} total tokens.
+
+There are three COMMUNICATION TAGS:
+- <GROUP>message<GROUP> - Sends message to group chat (all professors see this, uses token budget)
+- <WAIT:N><WAIT> - Pause for N seconds to see if others respond (max 5 seconds)
+- <THINK>reasoning<THINK> - Internal reasoning (not sent to other agents, does not count towards token budget)
+When ready to vote, use: VOTE: <student_index>. Otherwise, voting phase will happen at the end.
+
+For each turn, you do ONE of the following:
+- <THINK>...<THINK><GROUP>...<GROUP>
+- <THINK>...<THINK><WAIT:N><WAIT>
+- <GROUP>...<GROUP>
+- <WAIT:N><WAIT>
+- <THINK>...<THINK>
+- VOTE: <student_index>
+
+IT IS MANDATORY THAT THE TAG SHOULD APPEAR AT THE START AND END OF YOUR MESSAGE. MESSAGES LACKING OR COMBINING TAGS WILL BE INVALID AND WASTE YOUR TOKEN BUDGET.
+
+STRATEGIC CONSIDERATIONS:
+- You have unique research interest vector (hidden from others).
+- You must balance self-interest with compromise to avoid 0 utility.
+- When communicating with others, avoid using exact numbers or explicit references to the interest vector. Instead, use qualitative descriptions referencing the research topics (e.g. "This student is strong in AI and Systems but weak in HCI").
+- Communication is key to finding mutually acceptable choices.
+"""
+
+    def get_system_prompt(self, agent_id: str) -> str | None:
         """Get system prompt for a specific agent."""
         if self.system_prompt is None:
             return None
@@ -137,7 +176,7 @@ class AsyncTickerAdmissionsEnv(gym.Env):
 
         return observations, infos
 
-    def step(self, action: str) -> Tuple[Dict[str, Dict], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Dict]]:
+    def step(self, action: str | Dict[str, Any]) -> Tuple[Dict[str, Dict], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Dict]]:
         """
         Execute one step with active agent's action.
 
@@ -150,11 +189,24 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         """
         active_agent = self.episode_state["active_agent"]
 
+        action_text = action
+        if isinstance(action, dict):
+            if active_agent in action:
+                action_text = action.get(active_agent, "")
+            elif len(action) == 1:
+                action_text = next(iter(action.values()))
+            else:
+                action_text = ""
+        if action_text is None:
+            action_text = ""
+        if not isinstance(action_text, str):
+            action_text = str(action_text)
+
         # Parse action
-        parsed = self._parse_action(action)
+        parsed = self._parse_action(action_text)
 
         # Count tokens
-        token_count = self._count_tokens(action)
+        token_count = self._count_tokens(action_text)
 
         # Update active agent's ticker
         old_ticker = self.episode_state["agent_tickers"][active_agent]
@@ -164,7 +216,7 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         # Add message to history
         message = {
             "agent_id": active_agent,
-            "text": action,
+            "text": action_text,
             "ticker_time": new_ticker,
             "token_count": token_count,
             "message_type": parsed["type"]

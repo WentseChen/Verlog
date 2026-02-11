@@ -16,6 +16,7 @@ import copy
 import json
 import logging
 import os
+from pathlib import Path
 from enum import Enum
 from typing import Any, Optional, List
 from uuid import uuid4
@@ -104,6 +105,7 @@ class ToolAgentLoop(AgentLoopBase):
         cls.apply_chat_template_kwargs = config.data.get("apply_chat_template_kwargs", {})
         cls.prompt_length = config.actor_rollout_ref.rollout.prompt_length
         cls.response_length = config.actor_rollout_ref.rollout.response_length
+        cls.io_log_path = os.getenv("VERL_AGENT_IO_LOG_PATH", "logs/agent_model_io.log")
         cls.system_prompt = tokenizer.apply_chat_template(
             [{}], add_generation_prompt=False, tokenize=True, **cls.apply_chat_template_kwargs
         )
@@ -111,7 +113,30 @@ class ToolAgentLoop(AgentLoopBase):
         cls.interaction_config_file = config.actor_rollout_ref.rollout.multi_turn.interaction_config_path
         if cls.interaction_config_file:
             cls.interaction_map: dict[str, BaseInteraction] = cls._initialize_interactions(cls.interaction_config_file)
-        
+
+    def _append_step_io_log(
+        self,
+        *,
+        env_idx: int,
+        turn_id: int,
+        agent_id: str | None,
+        prompt_ids: list[int],
+        response_ids: list[int],
+    ) -> None:
+        prompt_text = self.tokenizer.decode(prompt_ids, skip_special_tokens=False)
+        response_text = self.tokenizer.decode(response_ids, skip_special_tokens=False)
+        timestamp = datetime.utcnow().isoformat(timespec="seconds")
+        log_block = (
+            f"\n=== {timestamp}Z env={env_idx} turn={turn_id} agent={agent_id} "
+            f"prompt_tokens={len(prompt_ids)} response_tokens={len(response_ids)} ===\n"
+            f"[PROMPT]\n{prompt_text}\n\n"
+            f"[OUTPUT]\n{response_text}\n"
+        )
+
+        log_file = Path(self.io_log_path)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with log_file.open("a", encoding="utf-8") as f:
+            f.write(log_block)
 
     def _detect_loop(self, messages: list[dict[str, Any]]) -> bool:
         """
@@ -139,7 +164,7 @@ class ToolAgentLoop(AgentLoopBase):
 
     @rollout_trace_op
     async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool, **kwargs) -> List[AgentLoopOutput]:
-
+        import pdb; pdb.set_trace()
         agent_id = kwargs.get("agent_id")
         if is_val:
             messages, info = env.reset(agent_id=agent_id)
@@ -194,6 +219,16 @@ class ToolAgentLoop(AgentLoopBase):
             actions = await self.loop.run_in_executor(
                 None,
                 lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
+            )
+            await self.loop.run_in_executor(
+                None,
+                lambda: self._append_step_io_log(
+                    env_idx=env_idx,
+                    turn_id=num_turns,
+                    agent_id=agent_id,
+                    prompt_ids=prompt_ids,
+                    response_ids=response_ids,
+                ),
             )
             if agent_id is not None:
                 actions = {agent_id: actions}
