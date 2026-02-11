@@ -39,6 +39,8 @@ def main(config):
     Args:
         config_dict: Hydra configuration dictionary containing training parameters.
     """
+    import torch
+    torch.cuda.empty_cache()
     run_ppo(config)
 
 

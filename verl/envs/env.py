@@ -38,25 +38,42 @@ class Env:
 
     def _build_messages(self, obs_text: str, agent_id: str | None):
         system_prompt = None
-        try:
-            prof_config = self.env._get_professor_config(agent_id)
-            system_prompt = self.env.prompt_builder.build_system_prompt(
-                professor_id=agent_id,
-                game=self.env.game,
-                personality=prof_config.personality,
-                personality_prompts=self.env.personality_prompts,
-                runner_mode="async",
-                token_budget=self.env.total_token_budget,
-                shared_token_budget=True,
-            )
-        except Exception:
-            system_prompt = None
+        if hasattr(self.env, "build_system_prompt"):
+            try:
+                system_prompt = self.env.build_system_prompt(agent_id)
+            except Exception:
+                system_prompt = None
+        if system_prompt is None:
+            try:
+                prof_config = self.env._get_professor_config(agent_id)
+                system_prompt = self.env.prompt_builder.build_system_prompt(
+                    professor_id=agent_id,
+                    game=self.env.game,
+                    personality=prof_config.personality,
+                    personality_prompts=self.env.personality_prompts,
+                    runner_mode="async",
+                    token_budget=self.env.total_token_budget,
+                    shared_token_budget=True,
+                )
+            except Exception:
+                system_prompt = None
 
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": obs_text})
         return messages
+
+    def _extract_obs_text(self, observations: dict, agent_id: str | None) -> str:
+        if agent_id is None:
+            return ""
+        obs_item = observations.get(agent_id, "")
+        if isinstance(obs_item, str):
+            return obs_item
+        if isinstance(obs_item, dict):
+            prompt_text = obs_item.get("prompt", "")
+            return prompt_text if isinstance(prompt_text, str) else str(prompt_text)
+        return str(obs_item)
 
     def _extract_agent_id_from_action(self, action) -> str | None:
         if action is None:
@@ -110,7 +127,7 @@ class Env:
             truncated = truncated.get(agent_id, False)
         if isinstance(infos, dict) and agent_id is not None:
             info = dict(infos.get(agent_id, info))
-        obs_text = observations.get(agent_id, {}).get("prompt", "")
+        obs_text = self._extract_obs_text(observations, agent_id)
         info["agent_id"] = agent_id
         info["raw_infos"] = infos
         messages = self._build_messages(obs_text, agent_id)
@@ -125,7 +142,7 @@ class Env:
         observations, infos = self.env.reset()
         if agent_id is None:
             agent_id = self.env.possible_agents[0] if self.env.possible_agents else None
-        obs_text = observations.get(agent_id, {}).get("prompt", "")
+        obs_text = self._extract_obs_text(observations, agent_id)
         info = dict(infos.get(agent_id, {}))
         info["agent_id"] = agent_id
         info["raw_infos"] = infos

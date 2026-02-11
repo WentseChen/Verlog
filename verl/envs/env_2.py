@@ -40,6 +40,17 @@ class Env:
     def _build_messages(self, obs_text: str, agent_id: str | None):
         return self.history.add_user_message(agent_id, obs_text)
 
+    def _extract_obs_text(self, observations, agent_id: str | None) -> str:
+        if agent_id is None or not observations:
+            return ""
+        obs_item = observations.get(agent_id, "")
+        if isinstance(obs_item, str):
+            return obs_item
+        if isinstance(obs_item, dict):
+            prompt_text = obs_item.get("prompt", "")
+            return prompt_text if isinstance(prompt_text, str) else str(prompt_text)
+        return str(obs_item)
+
     def _normalize_actions(self, action_text: str, agent_id: str | None):
         if agent_id is None:
             agent_id = self.env.possible_agents[0] if self.env.possible_agents else None
@@ -88,13 +99,16 @@ class Env:
 
         observations, rewards, terminations, truncations, infos = self.env.step(actions)
 
-        obs_text = observations.get(self.agent_id, "") if observations else ""
-        if isinstance(obs_text, dict):
-            obs_text = obs_text.get("prompt", "")
+        info = dict(infos.get(self.agent_id, {})) if infos else {}
+        next_agent = info.get("active_agent")
+        if isinstance(next_agent, str):
+            self.agent_id = next_agent
+
+        obs_text = self._extract_obs_text(observations, self.agent_id)
         reward = rewards.get(self.agent_id, 0.0) if rewards else 0.0
         terminated = terminations.get(self.agent_id, False) if terminations else False
         truncated = truncations.get(self.agent_id, False) if truncations else False
-        info = dict(infos.get(self.agent_id, {})) if infos else {}
+        info = dict(infos.get(self.agent_id, info)) if infos else info
         info["agent_id"] = self.agent_id
         info["raw_infos"] = infos
 
@@ -114,10 +128,12 @@ class Env:
             self.agent_id = self.env.possible_agents[0] if self.env.possible_agents else None
         else:
             self.agent_id = agent_id
-        obs_text = observations.get(self.agent_id, "") if observations else ""
-        if isinstance(obs_text, dict):
-            obs_text = obs_text.get("prompt", "")
         info = dict(infos.get(self.agent_id, {})) if infos else {}
+        next_agent = info.get("active_agent")
+        if isinstance(next_agent, str):
+            self.agent_id = next_agent
+            info = dict(infos.get(self.agent_id, info)) if infos else info
+        obs_text = self._extract_obs_text(observations, self.agent_id)
         info["agent_id"] = self.agent_id
         info["raw_infos"] = infos
         messages = self._build_messages(obs_text, self.agent_id)
@@ -150,6 +166,11 @@ class HistoryManager:
     def _get_system_prompt(self, agent_id: str | None) -> str | None:
         if agent_id is None:
             return None
+        if hasattr(self.env, "build_system_prompt"):
+            try:
+                return self.env.build_system_prompt(agent_id)
+            except Exception:
+                return None
         if not hasattr(self.env, "prompt_builder") or not hasattr(self.env, "game"):
             return None
         try:
