@@ -13,7 +13,7 @@ class AsyncTickerAdmissionsEnv(gym.Env):
     Supports wait actions, voting, and consensus detection.
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], tokenizer=None):
         super().__init__()
 
         # Configuration
@@ -23,6 +23,28 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         self.feature_dim = config.get("feature_dim", 5)
         self.vote_threshold = config.get("vote_threshold", 0.5)
         self.seed_value = config.get("seed", None)
+
+        # System prompt configuration
+        # Can be a single string (used for all agents) or dict mapping agent_id -> prompt
+        self.system_prompt = config.get("system_prompt", None)
+        self.tokenizer = tokenizer
+
+        # Cache system prompt token lengths
+        self.system_prompt_token_lengths = {}
+        if self.system_prompt and self.tokenizer:
+            if isinstance(self.system_prompt, str):
+                # Single prompt for all agents
+                tokens = self.tokenizer.encode(self.system_prompt, add_special_tokens=False)
+                token_length = len(tokens)
+                for agent_id in self.professor_ids:
+                    self.system_prompt_token_lengths[agent_id] = token_length
+            elif isinstance(self.system_prompt, dict):
+                # Per-agent prompts
+                for agent_id in self.professor_ids:
+                    prompt = self.system_prompt.get(agent_id, "")
+                    if prompt:
+                        tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
+                        self.system_prompt_token_lengths[agent_id] = len(tokens)
 
         # Multi-agent support: possible_agents attribute
         self.possible_agents = self.professor_ids
@@ -36,7 +58,15 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         if self.seed_value is not None:
             np.random.seed(self.seed_value)
 
-    def reset(self) -> Tuple[Dict[str, str], Dict[str, Dict]]:
+    def get_system_prompt(self, agent_id: str) -> Optional[str]:
+        """Get system prompt for a specific agent."""
+        if self.system_prompt is None:
+            return None
+        if isinstance(self.system_prompt, str):
+            return self.system_prompt
+        return self.system_prompt.get(agent_id, None)
+
+    def reset(self) -> Tuple[Dict[str, Dict], Dict[str, Dict]]:
         """Reset environment and return dict observations and infos for all agents."""
         # Initialize episode state
         self.episode_state = {
@@ -79,8 +109,11 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         obs_text = self._build_observation(active_agent)
 
         # Build observations dict (only active agent gets observation)
-        observations = {agent_id: obs_text if agent_id == active_agent else ""
-                       for agent_id in self.professor_ids}
+        # Format: {"prompt": obs_text} for VERL compatibility
+        observations = {
+            agent_id: {"prompt": obs_text} if agent_id == active_agent else {"prompt": ""}
+            for agent_id in self.professor_ids
+        }
 
         # Build info dict for all agents
         base_info = {
@@ -92,16 +125,24 @@ class AsyncTickerAdmissionsEnv(gym.Env):
             "professor_interests": self.professor_interests,
         }
 
+        # Add system prompt info if available
+        if self.system_prompt:
+            base_info["system_prompt"] = {
+                agent_id: self.get_system_prompt(agent_id) for agent_id in self.professor_ids
+            }
+            if self.system_prompt_token_lengths:
+                base_info["system_prompt_token_length"] = self.system_prompt_token_lengths
+
         infos = {agent_id: base_info.copy() for agent_id in self.professor_ids}
 
         return observations, infos
 
-    def step(self, action: str) -> Tuple[Dict[str, str], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Dict]]:
+    def step(self, action: str) -> Tuple[Dict[str, Dict], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Dict]]:
         """
         Execute one step with active agent's action.
 
         Returns:
-            observations: Dict mapping agent_id to observation string
+            observations: Dict mapping agent_id to observation dict {"prompt": obs_text}
             rewards: Dict mapping agent_id to reward value
             terminations: Dict mapping agent_id to termination bool
             truncations: Dict mapping agent_id to truncation bool (always False)
@@ -195,9 +236,20 @@ class AsyncTickerAdmissionsEnv(gym.Env):
             "professor_interests": self.professor_interests,
         }
 
+        # Add system prompt info if available
+        if self.system_prompt:
+            base_info["system_prompt"] = {
+                agent_id: self.get_system_prompt(agent_id) for agent_id in self.professor_ids
+            }
+            if self.system_prompt_token_lengths:
+                base_info["system_prompt_token_length"] = self.system_prompt_token_lengths
+
         # Build multi-agent return dicts
-        observations = {agent_id: obs_text if agent_id == next_agent else ""
-                       for agent_id in self.professor_ids}
+        # Format: {"prompt": obs_text} for VERL compatibility
+        observations = {
+            agent_id: {"prompt": obs_text} if agent_id == next_agent else {"prompt": ""}
+            for agent_id in self.professor_ids
+        }
         rewards = {agent_id: agent_rewards[agent_id] for agent_id in self.professor_ids}
         terminations = {agent_id: done for agent_id in self.professor_ids}
         truncations = {agent_id: False for agent_id in self.professor_ids}

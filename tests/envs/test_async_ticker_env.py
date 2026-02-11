@@ -55,6 +55,11 @@ def test_reset_initializes_state():
     assert "prof_1" in infos
     assert "prof_2" in infos
 
+    # Check observations are dicts with "prompt" key (VERL format)
+    assert isinstance(observations["prof_1"], dict)
+    assert "prompt" in observations["prof_1"]
+    assert isinstance(observations["prof_1"]["prompt"], str)
+
     # Get info from first agent
     info = infos["prof_1"]
 
@@ -615,3 +620,76 @@ def test_full_episode_budget_exhausted():
 
     # No consensus, so all rewards should be 0
     assert all(r == 0.0 for r in info["agent_rewards"].values())
+
+
+def test_system_prompt_single_string():
+    """Test system prompt with single string for all agents."""
+    system_prompt = "You are a professor in an admissions committee."
+    config = {
+        "professor_ids": ["prof_1", "prof_2"],
+        "students_per_batch": 5,
+        "token_budget": 1000,
+        "seed": 42,
+        "system_prompt": system_prompt,
+    }
+    
+    env = AsyncTickerAdmissionsEnv(config)
+    observations, infos = env.reset()
+    
+    # Check system prompt in info
+    info = infos["prof_1"]
+    assert "system_prompt" in info
+    assert info["system_prompt"]["prof_1"] == system_prompt
+    assert info["system_prompt"]["prof_2"] == system_prompt
+
+
+def test_system_prompt_per_agent():
+    """Test system prompt with different prompts per agent."""
+    system_prompts = {
+        "prof_1": "You are Professor Smith, an expert in ML.",
+        "prof_2": "You are Professor Jones, an expert in NLP.",
+    }
+    config = {
+        "professor_ids": ["prof_1", "prof_2"],
+        "students_per_batch": 5,
+        "token_budget": 1000,
+        "seed": 42,
+        "system_prompt": system_prompts,
+    }
+    
+    env = AsyncTickerAdmissionsEnv(config)
+    observations, infos = env.reset()
+    
+    # Check system prompts in info
+    info = infos["prof_1"]
+    assert "system_prompt" in info
+    assert info["system_prompt"]["prof_1"] == system_prompts["prof_1"]
+    assert info["system_prompt"]["prof_2"] == system_prompts["prof_2"]
+
+
+def test_system_prompt_token_length():
+    """Test system prompt token length logging with tokenizer."""
+    # Create a simple mock tokenizer
+    class MockTokenizer:
+        def encode(self, text, add_special_tokens=False):
+            # Simple word-based tokenization
+            return text.split()
+    
+    system_prompt = "You are a professor in an admissions committee."
+    config = {
+        "professor_ids": ["prof_1", "prof_2"],
+        "students_per_batch": 5,
+        "token_budget": 1000,
+        "seed": 42,
+        "system_prompt": system_prompt,
+    }
+    
+    tokenizer = MockTokenizer()
+    env = AsyncTickerAdmissionsEnv(config, tokenizer=tokenizer)
+    observations, infos = env.reset()
+    
+    # Check token length in info
+    info = infos["prof_1"]
+    assert "system_prompt_token_length" in info
+    assert info["system_prompt_token_length"]["prof_1"] == len(system_prompt.split())
+    assert info["system_prompt_token_length"]["prof_2"] == len(system_prompt.split())
