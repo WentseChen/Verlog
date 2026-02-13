@@ -253,15 +253,16 @@ class ToolAgentLoop(AgentLoopBase):
                                 ),
                             )
                             
-                            # Try z_content first, then " " + z_content if needed
-                            # First attempt: use z_content
+                            # z_content is now the entire response from dreaming phase
+                            # Tokenize z_content to match against response_ids
                             z_content_tokens = self.tokenizer.encode(z_content, add_special_tokens=False)
+                            
+                            # z_index2: mark which tokens in response_ids correspond to z_content
+                            # Since z_content is the entire response, try to match it
                             z_index2 = self._calculate_z_index2(response_ids, z_content_tokens)
                             
-                            # Check if z_index2 found a match (any True values in the response_ids part)
-                            z_index2_matched = any(z_index2)
-                            
-                            if not z_index2_matched:
+                            # If no match, try with space prefix (tokenization differences)
+                            if not any(z_index2):
                                 z_content_with_space = " " + z_content
                                 z_content_tokens = self.tokenizer.encode(z_content_with_space, add_special_tokens=False)
                                 z_index2 = self._calculate_z_index2(response_ids, z_content_tokens)
@@ -271,8 +272,8 @@ class ToolAgentLoop(AgentLoopBase):
                             
                             len_z_index = z_index[1] - z_index[0] if z_index is not None else 0
                             len_z_index2 = sum(z_index2)
-                            # assert len_z_index == len_z_index2, f"z_index and z_index2 must have the same length, got {len_z_index} and {len_z_index2}, z_content: {z_content}, answering_messages: {answering_messages}, response_text: {actions}"
-                            # warning only
+                            
+                            # Warning if lengths don't match
                             if len_z_index != len_z_index2:
                                 print(f"Warning: z_index and z_index2 must have the same length, got {len_z_index} and {len_z_index2}, len(z_content_tokens): {len(z_content_tokens)}")
                                 print("---")
@@ -282,6 +283,10 @@ class ToolAgentLoop(AgentLoopBase):
                             extra_fields["z_content"] = z_content_tokens  # List[int]
                             extra_fields["z_index"] = z_index  # (start, end) or None
                             extra_fields["z_index2"] = z_index2  # List[bool]
+                    
+                            # add length of z_index and z_index2 to info metrics
+                            info["metrics"]["z_index_length"] = len_z_index
+                            info["metrics"]["z_index2_length"] = len_z_index2
                     
                     turn_data = AgentLoopOutput(
                         prompt_ids=prompt_ids,

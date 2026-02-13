@@ -23,10 +23,10 @@ export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS_PER_NODE-1)))
 
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
-MODEL_PATH="Qwen/Qwen2.5-3B-Instruct"
+MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"
 
-NUM_ENVS=32
-BATCH_SIZE=256
+NUM_ENVS=4
+BATCH_SIZE=64
 MINI_BATCH_SIZE=$((BATCH_SIZE))
 MICRO_BATCH_SIZE=8
 FORWARD_BATCH_SIZE=$((4 * MICRO_BATCH_SIZE))
@@ -67,7 +67,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=True \
     algorithm.kl_ctrl.kl_coef=0.1 \
-    trainer.balance_batch=False \
+    trainer.balance_batch=True \
     trainer.critic_warmup=1 \
     trainer.critic_warmup_batch_repeat_times=1 \
     trainer.critic_warmup_batch_divide_ratio=1 \
@@ -79,7 +79,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=30 \
     trainer.total_epochs=60 \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=babyai \
     envs.task=BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to \

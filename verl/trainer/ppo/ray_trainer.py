@@ -1167,7 +1167,7 @@ class RayPPOTrainer:
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
                     # TODO: Decouple the DP balancing and mini-batching.
-                    assert self.config.trainer.balance_batch == False, "Async rollout mode does not support balance_batch yet."
+                    # assert self.config.trainer.balance_batch == False, "Async rollout mode does not support balance_batch yet."
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
 

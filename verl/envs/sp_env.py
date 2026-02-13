@@ -130,7 +130,7 @@ class MMLUEnv(gym.Env):
                     f"Domain: {subject}\n"
                     f"Question: {question}\n"
                     f"Options:\n{choices_text}\n\n"
-                    "Task: Analyze the logic inside <think>...</think>, then output ONLY the Context Description that satisfies the above instructions."
+                    "Task: Output ONLY the Context Description that satisfies the above instructions."
                 )
             }
         ]
@@ -167,7 +167,8 @@ class MMLUEnv(gym.Env):
 
         if self.phase == 'dreaming':
             raw_output = action_text
-            dream_thought, self.z_content = _parse_output(raw_output)
+            # z_content is now the entire response (no parsing needed)
+            self.z_content = raw_output
             
             if not self.z_content:
                 self.z_content = "No context generated."
@@ -201,7 +202,6 @@ class MMLUEnv(gym.Env):
             ]
             
             info = {
-                "dream_thought_trace": dream_thought,
                 "raw_dream_output": raw_output,
                 # Store answering phase messages and z_content as strings
                 # They will be tokenized in tool_agent.py
