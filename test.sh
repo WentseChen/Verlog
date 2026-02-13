@@ -68,7 +68,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=True \
     algorithm.kl_ctrl.kl_coef=0.1 \
     trainer.balance_batch=False \
-    trainer.critic_warmup=10 \
+    trainer.critic_warmup=1 \
     trainer.critic_warmup_batch_repeat_times=1 \
     trainer.critic_warmup_batch_divide_ratio=1 \
     trainer.logger='["console","wandb"]' \
@@ -79,7 +79,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=30 \
     trainer.total_epochs=60 \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=babyai \
     envs.task=BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to \

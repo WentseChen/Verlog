@@ -248,6 +248,30 @@ def compute_gae_advantage_return(
     
     with torch.no_grad():
         
+        # token level GAE
+        advantages_reversed = []
+        gen_len = token_level_rewards.shape[-1]
+
+        for t in reversed(range(gen_len)):
+            
+            nextvalues = 0.0
+            lastgaelam = 0.0
+            # Method 1: concise version
+            token_adv = token_level_rewards[:, t:].sum(-1) + nextvalues - values[:, t] + lastgaelam 
+            advantages_reversed.append(token_adv)
+
+            # Method 2: classic version
+            # delta = token_level_rewards[:, t] + token_gamma * nextvalues - values[:, t]
+            # lastgaelam_ = delta + token_gamma * token_lam * lastgaelam
+            # nextvalues = values[:, t] * response_mask[:, t] + (1 - response_mask[:, t]) * nextvalues
+            # lastgaelam = lastgaelam_ * response_mask[:, t] + (1 - response_mask[:, t]) * lastgaelam
+            # advantages_reversed.append(lastgaelam * response_mask[:, t])
+        
+        advantages = torch.stack(advantages_reversed[::-1], dim=1)
+
+        returns = advantages + values
+        return advantages, returns
+    
         # get turn level rewards and values
         turn_values = values[:,0].clone()                   # [B]
         turn_rewards = token_level_rewards.clone().sum(-1)  # [B]

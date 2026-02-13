@@ -108,6 +108,49 @@ class ToolAgentLoop(AgentLoopBase):
             [{}], add_generation_prompt=False, tokenize=True, **cls.apply_chat_template_kwargs
         )
 
+    def _calculate_z_index(self, answering_prompt_ids, z_content_tokens):
+        """
+        Calculate the token index range where z_content_tokens appear in answering_prompt_ids.
+        """
+        if not z_content_tokens:
+            return None
+        
+        z_len = len(z_content_tokens)
+        prompt_len = len(answering_prompt_ids)
+        
+        # Find where z_tokens appear in answering_prompt_ids
+        for i in range(prompt_len - z_len + 1):
+            if answering_prompt_ids[i:i+z_len] == z_content_tokens:
+                return (i, i + z_len)
+        
+        return None
+
+    def _calculate_z_index2(self, response_ids, z_content_tokens):
+        """
+        Calculate which tokens in response_ids correspond to z_content_tokens.
+        """
+        if not z_content_tokens:
+            return [False] * len(response_ids)
+        
+        z_len = len(z_content_tokens)
+        response_len = len(response_ids)
+        
+        # Create boolean mask
+        z_index2 = [False] * response_len
+        
+        # Find where z_tokens appear in response_ids
+        for i in range(response_len - z_len + 1):
+            if response_ids[i:i+z_len] == z_content_tokens:
+                # Mark these positions as True
+                for j in range(i, i+z_len):
+                    z_index2[j] = True
+                break
+        
+        # pad to self.response_length
+        z_index2 = z_index2 + [False] * (self.response_length - len(z_index2))
+        
+        return z_index2
+
     @rollout_trace_op
     async def run(self, env, data_buffer, env_idx: int, sampling_params: dict[str, Any], is_val: bool, **kwargs) -> List[AgentLoopOutput]:
         
@@ -182,19 +225,70 @@ class ToolAgentLoop(AgentLoopBase):
                 
                 # Check if we're in the answering phase
                 if last_phase == "answering":
-                    if response_logprobs is not None and len(response_logprobs) > 0:
+                    if response_logprobs is not None and len(response_logprobs) > 0 and not is_val:
                         avg_log_prob = np.mean(response_logprobs)
                         prob = np.exp(avg_log_prob)
-                        adjusted_reward = reward * avg_log_prob / prob
+                        adjusted_reward = reward / prob # * avg_log_prob / prob
                         adjusted_reward = np.clip(adjusted_reward, -5.0, 5.0)
                         reward = adjusted_reward
                     outputs[-1].rewards = reward
                 else:
+                    # Persist env-provided info (including phase-transition metadata) with the turn.
+                    extra_fields = {}
+                    if isinstance(info, dict):
+                        # MMLUEnv (sp_env) provides answering_messages and z_content as strings
+                        if "answering_messages" in info and "z_content" in info:
+                            answering_messages = info["answering_messages"]
+                            z_content = info["z_content"]
+                            
+                            # Tokenize answering_messages to get token sequence
+                            answering_prompt_ids = await self.loop.run_in_executor(
+                                None,
+                                lambda: self.tokenizer.apply_chat_template(
+                                    answering_messages,
+                                    tools=self.tool_schemas,
+                                    add_generation_prompt=True,
+                                    tokenize=True,
+                                    **self.apply_chat_template_kwargs,
+                                ),
+                            )
+                            
+                            # Try z_content first, then " " + z_content if needed
+                            # First attempt: use z_content
+                            z_content_tokens = self.tokenizer.encode(z_content, add_special_tokens=False)
+                            z_index2 = self._calculate_z_index2(response_ids, z_content_tokens)
+                            
+                            # Check if z_index2 found a match (any True values in the response_ids part)
+                            z_index2_matched = any(z_index2)
+                            
+                            if not z_index2_matched:
+                                z_content_with_space = " " + z_content
+                                z_content_tokens = self.tokenizer.encode(z_content_with_space, add_special_tokens=False)
+                                z_index2 = self._calculate_z_index2(response_ids, z_content_tokens)
+                            
+                            # Calculate z_index: where z_content tokens appear in answering_prompt_ids
+                            z_index = self._calculate_z_index(answering_prompt_ids, z_content_tokens)
+                            
+                            len_z_index = z_index[1] - z_index[0] if z_index is not None else 0
+                            len_z_index2 = sum(z_index2)
+                            # assert len_z_index == len_z_index2, f"z_index and z_index2 must have the same length, got {len_z_index} and {len_z_index2}, z_content: {z_content}, answering_messages: {answering_messages}, response_text: {actions}"
+                            # warning only
+                            if len_z_index != len_z_index2:
+                                print(f"Warning: z_index and z_index2 must have the same length, got {len_z_index} and {len_z_index2}, len(z_content_tokens): {len(z_content_tokens)}")
+                                print("---")
+                            
+                            # Store tokenized versions in extra_fields
+                            extra_fields["answering_messages"] = answering_prompt_ids  # List[int]
+                            extra_fields["z_content"] = z_content_tokens  # List[int]
+                            extra_fields["z_index"] = z_index  # (start, end) or None
+                            extra_fields["z_index2"] = z_index2  # List[bool]
+                    
                     turn_data = AgentLoopOutput(
                         prompt_ids=prompt_ids,
                         response_ids=response_ids,
                         response_mask=response_mask,
                         response_logprobs=response_logprobs,
+                        extra_fields=extra_fields,
                         metrics=metrics,
                         rewards=reward,
                         done=True,
@@ -220,19 +314,18 @@ class ToolAgentLoop(AgentLoopBase):
                     ),
                 )
             
-        # Add final turn data for this episode
-        turn_data = AgentLoopOutput(
-            prompt_ids=last_prompt_ids,
-            response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
-            response_mask=[1],
-            metrics=dict(),
-            rewards=reward if is_val else 0.0,
-            done=True,
-            num_turns=1,
-            env_idx=env_idx,
-            info=last_info["metrics"],
-        )
-        outputs.append(turn_data)
+        # # Add final turn data for this episode
+        # turn_data = AgentLoopOutput(
+        #     prompt_ids=last_prompt_ids,
+        #     response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
+        #     response_mask=[1],
+        #     metrics=dict(),
+        #     rewards=0.0,
+        #     done=True,
+        #     num_turns=1,
+        #     env_idx=env_idx,
+        #     info=last_info["metrics"],
+        # )
+        # outputs.append(turn_data)
         
         return outputs
-

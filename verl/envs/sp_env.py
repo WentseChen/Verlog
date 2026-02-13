@@ -2,6 +2,7 @@ import gymnasium as gym
 import re
 from datasets import load_dataset
 from verl.protocol import DataProto, DataProtoItem
+import numpy as np
 
 def transform_dataproto_to_sample(sample):
     """
@@ -144,10 +145,25 @@ class MMLUEnv(gym.Env):
         
         # --- Helper: Extract Thought vs Content ---
         def _parse_output(text):
-            think_match = re.search(r'<think>(.*?)</think>', text, flags=re.DOTALL)
-            thought_content = think_match.group(1).strip() if think_match else ""
-            clean_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-            return thought_content, clean_text.strip()
+            end_tag = "</think>"
+            
+            end_idx = text.find(end_tag)
+            
+            if end_idx != -1:
+                thought_part = text[:end_idx]
+                thought_content = thought_part.replace("<think>", "").strip()
+                
+                raw_content = text[end_idx + len(end_tag):]
+                
+                z_content = raw_content.lstrip('\r\n')
+                
+                if not z_content:
+                     z_content = "No context generated."
+            else:
+                thought_content = ""
+                z_content = text.lstrip('\r\n') 
+                
+            return thought_content, z_content
 
         if self.phase == 'dreaming':
             raw_output = action_text
@@ -177,7 +193,7 @@ class MMLUEnv(gym.Env):
                 {
                     "role": "user", 
                     "content": (
-                        f"Context Description: {self.z_content}\n\n"
+                        f"Context Description:\n{self.z_content} \n\n"
                         f"Options:\n{choice_str}\n\n"
                         "Output Format: <think> reasoning </think> Label"
                     )
@@ -187,6 +203,10 @@ class MMLUEnv(gym.Env):
             info = {
                 "dream_thought_trace": dream_thought,
                 "raw_dream_output": raw_output,
+                # Store answering phase messages and z_content as strings
+                # They will be tokenized in tool_agent.py
+                "answering_messages": messages,
+                "z_content": self.z_content,
                 "temperature": 0.1,
                 "max_tokens": 2048,
                 "phase": "answering",
@@ -224,7 +244,7 @@ class MMLUEnv(gym.Env):
             
             # print("Answering Phase:")
             # print("Answer Thought:", answer_thought)
-            # print(f"Prediction: {pred_label} | Truth: {true_label}")
+            # print(f"Prediction: {pred_label} | Truth: {true_label} | Reward: {reward}")
             
             return None, reward, done, truncated, info
 

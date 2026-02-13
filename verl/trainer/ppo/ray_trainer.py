@@ -60,6 +60,7 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.utils.model import compute_position_id_with_mask
 
 def get_episode_structure(episode_idx: np.ndarray):
     """
@@ -631,8 +632,8 @@ class RayPPOTrainer:
             unique_envs = np.unique(env_idx)
             last_positions = [np.where(env_idx == uni_env)[0][-1] for uni_env in unique_envs]
             last_positions = np.array(last_positions)
-            val_rewards = test_output_gen_batch_padded.batch["rewards"][last_positions]
-            val_traj_len = test_output_gen_batch_padded.non_tensor_batch['__num_turns__'][last_positions] + 1
+            val_rewards = test_output_gen_batch_padded.batch["rewards"]
+            val_traj_len = test_output_gen_batch_padded.non_tensor_batch['__num_turns__'] + 1
             
             metric_dict = dict()
             metric_dict["mean_rewards"] = val_rewards.mean().item()
@@ -1109,7 +1110,7 @@ class RayPPOTrainer:
                 gen_batch = self._get_gen_batch(batch)
                 # store s_{T+1} of each episode for bootstrapping
                 num_envs = self.config.envs.num_envs
-                batch = DataProto.concat([batch, batch[-num_envs:]])
+                # batch = DataProto.concat([batch, batch[-num_envs:]])
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
@@ -1205,10 +1206,119 @@ class RayPPOTrainer:
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer("ref", timing_raw, color="olive"):
+                            # Compute ref log prob for original batch
                             if not self.ref_in_actor:
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                            
+                            # Check if batch contains answering_messages for z_content replacement
+                            # All samples should have these fields if any do
+                            first_item = batch[0]
+                            if "answering_messages" in first_item.non_tensor_batch:
+                                # Extract data from all samples using batch operations
+                                # answering_messages: List[List[int]] - each item is a tokenized prompt
+                                # z_index: List[tuple] - each item is (start, end) or None
+                                # z_index2: List[List[bool]] - each item is a boolean mask
+                                
+                                answering_messages_list = []
+                                z_index_list = []
+                                z_index2_list = []
+                                valid_mask = []  # Track which samples have valid z_index
+                                
+                                for idx in range(len(batch)):
+                                    item = batch[idx]
+                                    answering_msg = item.non_tensor_batch.get("answering_messages", None)
+                                    z_idx = item.non_tensor_batch.get("z_index", None)
+                                    z_idx2 = item.non_tensor_batch.get("z_index2", None)
+                                    
+                                    answering_messages_list.append(answering_msg)
+                                    z_index_list.append(z_idx)
+                                    z_index2_list.append(z_idx2)
+                                    valid_mask.append(z_idx is not None and z_idx2 is not None)
+                                
+                                # Only process if we have valid samples
+                                if any(valid_mask):
+                                    # Pad answering_messages to create a batch tensor
+                                    max_len = max(len(msg) for msg in answering_messages_list if msg is not None)
+                                    batch_size = len(answering_messages_list)
+                                    
+                                    # Create padded tensor for all answering messages
+                                    padded_input_ids = torch.full(
+                                        (batch_size, max_len), 
+                                        self.tokenizer.pad_token_id, 
+                                        dtype=torch.long
+                                    )
+                                    attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
+                                    
+                                    for idx, msg in enumerate(answering_messages_list):
+                                        if msg is not None:
+                                            seq_len = len(msg)
+                                            # Right-align (pad on left)
+                                            padded_input_ids[idx, -seq_len:] = torch.tensor(msg, dtype=torch.long)
+                                            attention_mask[idx, -seq_len:] = 1
+                                    
+                                    position_ids = compute_position_id_with_mask(attention_mask)
+                                    
+                                    # Create DataProto for answering messages batch
+                                    # Since answering_messages are prompts (not sequences with responses),
+                                    # we set responses to be the same as input_ids to compute log probs for the entire sequence
+                                    answering_data = DataProto.from_dict(
+                                        tensors={
+                                            "input_ids": padded_input_ids,
+                                            "attention_mask": attention_mask,
+                                            "position_ids": position_ids,
+                                            "responses": padded_input_ids.clone(),  # Same as input_ids since entire sequence is the "response"
+                                        },
+                                        non_tensors={}
+                                    )
+                                    
+                                    # Compute ref log prob for all answering messages in one batch
+                                    if not self.ref_in_actor:
+                                        answering_ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(answering_data)
+                                    else:
+                                        answering_ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(answering_data)
+                                    
+                                    # Extract answering ref log probs tensor: (batch_size, max_len)
+                                    answering_ref_log_probs = answering_ref_log_prob.batch["ref_log_prob"]
+                                    
+                                    # Replace z_content tokens in original ref_log_prob using batch operations
+                                    original_ref_log_probs = ref_log_prob.batch["ref_log_prob"]  # (batch_size, response_len)
+                                    
+                                    # Process each sample to replace z_content tokens
+                                    for idx in range(batch_size):
+                                        if not valid_mask[idx]:
+                                            continue
+                                        
+                                        z_start, z_end = z_index_list[idx]
+                                        z_idx2_mask = z_index2_list[idx]  # List[bool]
+                                        
+                                        # Get answering ref log probs for this sample
+                                        ans_msg_len = len(answering_messages_list[idx])
+                                        # Account for right-alignment padding
+                                        pad_offset = max_len - ans_msg_len
+                                        z_start_padded = z_start + pad_offset
+                                        z_end_padded = z_end + pad_offset
+                                        
+                                        # Extract z_content ref log probs from answering messages
+                                        z_content_ref_lps = answering_ref_log_probs[idx, z_start_padded:z_end_padded]
+                                        
+                                        # Convert z_index2 to tensor
+                                        z_idx2_tensor = torch.tensor(z_idx2_mask, dtype=torch.bool)
+                                        
+                                        # Verify dimensions match
+                                        num_z_tokens = z_idx2_tensor.sum().item()
+                                        if num_z_tokens != len(z_content_ref_lps):
+                                            print(f"Warning: z_index2 count ({num_z_tokens}) != z_content length ({len(z_content_ref_lps)}) for sample {idx}")
+                                            continue
+                                        
+                                        # Replace tokens using boolean indexing
+                                        original_ref_log_probs[idx, z_idx2_tensor] = z_content_ref_lps
+                                    
+                                    # Update the ref_log_prob batch
+                                    ref_log_prob.batch["ref_log_prob"] = original_ref_log_probs
+                            
+                            # Union the (possibly modified) ref_log_prob with batch
                             batch = batch.union(ref_log_prob)
 
                     # compute values
@@ -1268,7 +1378,8 @@ class RayPPOTrainer:
                         )
                     
                     # the last turn for each episode (parallel environment) is only used for bootstrapping the value,
-                    batch4train = remove_last_turn_in_episode(batch)
+                    # batch4train = remove_last_turn_in_episode(batch)
+                    batch4train = batch
 
                     # update critic
                     if self.use_critic:
