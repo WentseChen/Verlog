@@ -105,7 +105,7 @@ class ToolAgentLoop(AgentLoopBase):
         cls.apply_chat_template_kwargs = config.data.get("apply_chat_template_kwargs", {})
         cls.prompt_length = config.actor_rollout_ref.rollout.prompt_length
         cls.response_length = config.actor_rollout_ref.rollout.response_length
-        cls.io_log_path = os.getenv("VERL_AGENT_IO_LOG_PATH", "logs/agent_model_io.log")
+        cls.io_log_path = os.getenv("VERL_AGENT_IO_LOG_PATH", "logs/agent_model_io2.log")
         cls.system_prompt = tokenizer.apply_chat_template(
             [{}], add_generation_prompt=False, tokenize=True, **cls.apply_chat_template_kwargs
         )
@@ -138,6 +138,12 @@ class ToolAgentLoop(AgentLoopBase):
         with log_file.open("a", encoding="utf-8") as f:
             f.write(log_block)
 
+    def _truncate_prompt_ids(self, prompt_ids: list[int]) -> list[int]:
+        """Keep only the most recent tokens to respect rollout prompt_length."""
+        if len(prompt_ids) <= self.prompt_length:
+            return prompt_ids
+        return prompt_ids[-self.prompt_length:]
+
     def _detect_loop(self, messages: list[dict[str, Any]]) -> bool:
         """
         Detect if a loop occurred by checking if the last message contains a hint.
@@ -164,7 +170,6 @@ class ToolAgentLoop(AgentLoopBase):
 
     @rollout_trace_op
     async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool, **kwargs) -> List[AgentLoopOutput]:
-        import pdb; pdb.set_trace()
         agent_id = kwargs.get("agent_id")
         if is_val:
             messages, info = env.reset(agent_id=agent_id)
@@ -191,10 +196,13 @@ class ToolAgentLoop(AgentLoopBase):
                 **self.apply_chat_template_kwargs,
             ),
         )
+        prompt_ids = self._truncate_prompt_ids(prompt_ids)
         
         outputs = []
         num_turns = 0
         reward = 0.0
+        is_full = False
+        bootstrap_added = False
         while True:
             
             with simple_timer("generate_sequences", metrics):
@@ -289,47 +297,26 @@ class ToolAgentLoop(AgentLoopBase):
                     **self.apply_chat_template_kwargs,
                 ),
             )
+            prompt_ids = self._truncate_prompt_ids(prompt_ids)
             
             is_full = await counter.increment.remote()
             if is_full and not is_val:
-                # Buffer is full - create bootstrap turns for ALL agents in multi-agent setup
-                # Get list of all agents from environment
-                possible_agents = (
-                    getattr(env, "possible_agents", None)
-                    or getattr(getattr(env, "env", None), "possible_agents", None)
+                # Training truncation path: append exactly one bootstrap sample
+                # so output cardinality stays aligned with trainer expectations.
+                bootstrap_turn = AgentLoopOutput(
+                    prompt_ids=last_prompt_ids,
+                    response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
+                    response_mask=[1],
+                    metrics=dict(),
+                    rewards=0.0,
+                    done=True,
+                    num_turns=num_turns,
+                    env_idx=env_idx,
+                    agent_id=agent_id,
+                    turn_id=num_turns,
                 )
-
-                if possible_agents:
-                    # Multi-agent: create bootstrap turn for each agent
-                    for bootstrap_agent_id in possible_agents:
-                        bootstrap_turn = AgentLoopOutput(
-                            prompt_ids=last_prompt_ids,
-                            response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
-                            response_mask=[1],
-                            metrics=dict(),
-                            rewards=0.0,  # Bootstrap turn doesn't carry reward
-                            done=True,
-                            num_turns=num_turns,
-                            env_idx=env_idx,
-                            agent_id=bootstrap_agent_id,  # Set correct agent_id per bootstrap
-                            turn_id=num_turns,  # Bootstrap turn_id
-                        )
-                        outputs.append(bootstrap_turn)
-                else:
-                    # Single-agent: create one bootstrap turn
-                    bootstrap_turn = AgentLoopOutput(
-                        prompt_ids=last_prompt_ids,
-                        response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
-                        response_mask=[1],
-                        metrics=dict(),
-                        rewards=0.0,
-                        done=True,
-                        num_turns=num_turns,
-                        env_idx=env_idx,
-                        agent_id=agent_id,
-                        turn_id=num_turns,
-                    )
-                    outputs.append(bootstrap_turn)
+                outputs.append(bootstrap_turn)
+                bootstrap_added = True
                 break  # Exit loop after buffer truncation
             else:
                 # Buffer not full or validation - append normal turn and continue
@@ -337,7 +324,7 @@ class ToolAgentLoop(AgentLoopBase):
 
         # Episode completed naturally (not truncated) - add final bootstrap turn
         # This happens when done=True from environment termination
-        if not (is_full and not is_val):
+        if not bootstrap_added:
             bootstrap_turn = AgentLoopOutput(
                 prompt_ids=last_prompt_ids,
                 response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
