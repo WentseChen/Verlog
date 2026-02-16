@@ -83,6 +83,7 @@ class Env:
         # action is the agent's response text; env returns prompts/messages
         if self.agent_id is None and self.env.possible_agents:
             self.agent_id = self.env.possible_agents[0]
+        acting_agent_id = self.agent_id
 
         action_text = ""
         if isinstance(action, dict):
@@ -99,7 +100,7 @@ class Env:
 
         observations, rewards, terminations, truncations, infos = self.env.step(actions)
 
-        info = dict(infos.get(self.agent_id, {})) if infos else {}
+        info = dict(infos.get(acting_agent_id, {})) if infos else {}
         next_agent = info.get("active_agent")
         if isinstance(next_agent, str):
             self.agent_id = next_agent
@@ -113,7 +114,8 @@ class Env:
         info["raw_infos"] = infos
 
         if action_text:
-            self.history.add_assistant_message(self.agent_id, action_text)
+            # Attribute assistant output to the actor that produced it, not the next active agent.
+            self.history.add_assistant_message(acting_agent_id, action_text)
         messages = self._build_messages(obs_text, self.agent_id)
         self.last_msg = messages
         self.last_info = info
