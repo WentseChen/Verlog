@@ -488,9 +488,18 @@ Your turn:"""
         if not self.episode_state["votes"]:
             return False, None
 
+        # Only consider votes that point to an existing student index.
+        valid_votes = [
+            student_index
+            for student_index in self.episode_state["votes"].values()
+            if 0 <= student_index < len(self.student_batch)
+        ]
+        if not valid_votes:
+            return False, None
+
         # Count votes for each student index
         from collections import Counter
-        vote_counts = Counter(self.episode_state["votes"].values())
+        vote_counts = Counter(valid_votes)
 
         # Check if any student has enough votes
         n_professors = len(self.professor_ids)
@@ -544,6 +553,9 @@ Your turn:"""
             return {agent_id: 0.0 for agent_id in self.professor_ids}
 
         consensus_choice = self.episode_state["consensus_choice"]
+        if consensus_choice is None or consensus_choice < 0 or consensus_choice >= len(self.student_batch):
+            # Defensive guard: malformed vote/choice should never crash rollout workers.
+            return {agent_id: 0.0 for agent_id in self.professor_ids}
         selected_student = self.student_batch[consensus_choice]
 
         # Calculate utility-based rewards for all professors

@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=async-ticker-dryrun
+#SBATCH --job-name=loop
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --mem=200G
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
-#SBATCH --partition=gpuA40x4
+#SBATCH --cpus-per-task=4
+#SBATCH --partition=gpuA100x4
 #SBATCH --account=bfoz-delta-gpu
-#SBATCH --time=01:00:00
+#SBATCH --time=47:59:59
 #SBATCH --gpus-per-node=4
 
 
@@ -24,23 +24,29 @@ export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS_PER_NODE-1)))
 
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
-LOG_PATH="${VERL_AGENT_IO_LOG_PATH:-$PROJECT_DIR/logs/agent_model_io3.log}"
+LOG_PATH="${VERL_AGENT_IO_LOG_PATH:-$PROJECT_DIR/logs/agent_model_io5.log}"
 mkdir -p "$(dirname "$LOG_PATH")"
 : > "$LOG_PATH"
 export VERL_AGENT_IO_LOG_PATH="$LOG_PATH"
 
 # Dry run parameters - keep these conservative to avoid OOM on a single 44GB GPU.
 # Async agent loop chunks prompts across workers, so keep NUM_ENVS <= BATCH_SIZE.
-NUM_ENVS=1
-BATCH_SIZE=2
-MINI_BATCH_SIZE=2
-MICRO_BATCH_SIZE=1
-FORWARD_BATCH_SIZE=2
-OFFLOAD=true
-PPO_EPOCHS=1
+# NUM_ENVS=1
+# BATCH_SIZE=2
+# MINI_BATCH_SIZE=2
+# MICRO_BATCH_SIZE=8
+# FORWARD_BATCH_SIZE=2
+# OFFLOAD=true
+# PPO_EPOCHS=1
+NUM_ENVS=32
+BATCH_SIZE=256
+MINI_BATCH_SIZE=$((BATCH_SIZE))
+MICRO_BATCH_SIZE=8
+FORWARD_BATCH_SIZE=$((4 * MICRO_BATCH_SIZE))
+OFFLOAD=false
+PPO_EPOCHS=3
 
 export VLLM_USE_V1=1
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.8
 export WANDB_API_KEY=5cd6b6564c0f79ebf65ce694e5e3b54b725ff225
 python3 -m verl.trainer.main_ppo \
     --config-path="$CONFIG_PATH" \
@@ -70,24 +76,24 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.enforce_eager=True \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.25 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.agent.num_workers=${NUM_ENVS} \
     actor_rollout_ref.rollout.n=1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    algorithm.use_kl_in_reward=False \
+    algorithm.use_kl_in_reward=True \
     trainer.balance_batch=False \
     trainer.critic_warmup=0 \
     trainer.critic_warmup_batch_repeat_times=4 \
-    trainer.critic_warmup_batch_divide_ratio=2 \
-    trainer.logger='["console"]' \
+    trainer.critic_warmup_batch_divide_ratio=1 \
+    trainer.logger='["console","wandb"]' \
     trainer.project_name='async-ticker-dryrun' \
     trainer.experiment_name='test-run' \
-    trainer.n_gpus_per_node=1 \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
-    trainer.total_epochs=1 \
+    trainer.total_epochs=3 \
     trainer.val_before_train=False \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=async_ticker_admissions \

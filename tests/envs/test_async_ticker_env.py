@@ -414,6 +414,23 @@ def test_check_consensus_discussion_resets():
     assert consensus is False
 
 
+def test_check_consensus_ignores_out_of_range_votes():
+    """Out-of-range vote indices should not trigger consensus."""
+    config = {"professor_ids": ["prof_1", "prof_2", "prof_3"], "students_per_batch": 5, "token_budget": 1000, "vote_threshold": 0.5, "seed": 42}
+    env = AsyncTickerAdmissionsEnv(config)
+    observations, infos = env.reset()
+
+    env.episode_state["votes"] = {
+        "prof_1": 99,
+        "prof_2": 99,
+        "prof_3": 99,
+    }
+
+    consensus, choice = env._check_consensus()
+    assert consensus is False
+    assert choice is None
+
+
 def test_step_detects_early_consensus():
     """Test that step function detects consensus when threshold is reached."""
     config = {"professor_ids": ["prof_1", "prof_2", "prof_3"], "students_per_batch": 5, "token_budget": 10000, "vote_threshold": 0.67, "seed": 42}
@@ -474,6 +491,20 @@ def test_calculate_rewards_with_consensus():
     assert rewards["prof_1"] > rewards["prof_2"]
     assert rewards["prof_1"] == pytest.approx(1.9)
     assert rewards["prof_2"] == pytest.approx(1.1)
+
+
+def test_calculate_rewards_invalid_consensus_choice_returns_zeros():
+    """Invalid consensus choice should be handled defensively and return zero rewards."""
+    config = {"professor_ids": ["prof_1", "prof_2"], "students_per_batch": 3, "token_budget": 1000, "feature_dim": 3, "seed": 42}
+    env = AsyncTickerAdmissionsEnv(config)
+    observations, infos = env.reset()
+
+    env.episode_state["consensus_reached"] = True
+    env.episode_state["consensus_choice"] = 99
+
+    rewards = env._calculate_rewards()
+    assert rewards["prof_1"] == 0.0
+    assert rewards["prof_2"] == 0.0
 
 
 def test_step_returns_rewards_when_done():
