@@ -346,11 +346,20 @@ class vLLMHttpServer:
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
-        max_tokens = max(1, self.config.max_model_len - len(prompt_ids))
+        prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        max_prompt_len = max(1, self.config.max_model_len - 1)
+        if len(prompt_ids) > max_prompt_len:
+            logger.warning(
+                "Request %s prompt length %d exceeds max_prompt_len %d; left-truncating before generation.",
+                request_id,
+                len(prompt_ids),
+                max_prompt_len,
+            )
+            prompt_ids = prompt_ids[-max_prompt_len:]
+        max_tokens = self.config.max_model_len - len(prompt_ids)
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
-        prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         prompt = TokensPrompt(
             prompt_token_ids=prompt_ids, multi_modal_data={"image": image_data} if image_data else None
         )

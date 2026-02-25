@@ -138,24 +138,69 @@ class ToolAgentLoop(AgentLoopBase):
         with log_file.open("a", encoding="utf-8") as f:
             f.write(log_block)
 
-    def _truncate_prompt_ids(self, prompt_ids: list[int]) -> list[int]:
-        """Keep only the most recent tokens to respect rollout prompt_length."""
-        if len(prompt_ids) <= self.prompt_length:
-            return prompt_ids
-        return prompt_ids[-self.prompt_length:]
-
     def _build_prompt_ids(self, messages: list[dict[str, Any]]) -> list[int]:
-        """Build prompt ids with tokenizer-side truncation to avoid overlength warnings."""
+        """Build prompt ids while preserving the initial system prompt when truncating."""
         tokenize_kwargs = dict(self.apply_chat_template_kwargs)
-        tokenize_kwargs.setdefault("truncation", True)
-        tokenize_kwargs.setdefault("max_length", self.prompt_length)
-        return self.tokenizer.apply_chat_template(
-            messages,
-            tools=self.tool_schemas,
-            add_generation_prompt=True,
-            tokenize=True,
-            **tokenize_kwargs,
+        # We manage truncation ourselves to preserve system prompt + newest turns.
+        tokenize_kwargs.pop("truncation", None)
+        tokenize_kwargs.pop("max_length", None)
+
+        def _tokenize(msgs: list[dict[str, Any]]) -> list[int]:
+            return self.tokenizer.apply_chat_template(
+                msgs,
+                tools=self.tool_schemas,
+                add_generation_prompt=True,
+                tokenize=True,
+                **tokenize_kwargs,
+            )
+
+        if not messages:
+            return _tokenize(messages)
+
+        has_system = messages[0].get("role") == "system"
+        prefix_messages = [messages[0]] if has_system else []
+        tail_messages = messages[1:] if has_system else messages
+
+        best_ids: list[int] | None = None
+        best_start_idx: int | None = None
+
+        # Start from the shortest candidate and progressively add older turns.
+        # This avoids tokenizing the full history first, which can emit long-sequence warnings.
+        if has_system:
+            start_indices = range(len(tail_messages), -1, -1)
+        else:
+            # Without a system prompt, keep at least the latest message.
+            if not tail_messages:
+                return []
+            start_indices = range(len(tail_messages) - 1, -1, -1)
+
+        for start_idx in start_indices:
+            candidate_messages = prefix_messages + tail_messages[start_idx:]
+            candidate_ids = _tokenize(candidate_messages)
+            if len(candidate_ids) <= self.prompt_length:
+                best_ids = candidate_ids
+                best_start_idx = start_idx
+            elif best_ids is not None:
+                # Adding older turns made it too long; previous fit is maximal under budget.
+                break
+
+        if best_ids is not None:
+            if best_start_idx and best_start_idx > 0:
+                logger.warning(
+                    "Prompt exceeded prompt_length; dropped %d oldest non-system messages.",
+                    best_start_idx,
+                )
+            return best_ids
+
+        # If even minimal context is too long, truncate token IDs as a final fallback.
+        minimal_messages = prefix_messages if has_system else [tail_messages[-1]]
+        minimal_ids = _tokenize(minimal_messages)
+        logger.warning(
+            "Minimal prompt still exceeds prompt_length (%d > %d); truncating token IDs as fallback.",
+            len(minimal_ids),
+            self.prompt_length,
         )
+        return minimal_ids[-self.prompt_length:]
 
     def _detect_loop(self, messages: list[dict[str, Any]]) -> bool:
         """
@@ -203,7 +248,6 @@ class ToolAgentLoop(AgentLoopBase):
             None,
             lambda: self._build_prompt_ids(messages),
         )
-        prompt_ids = self._truncate_prompt_ids(prompt_ids)
         
         outputs = []
         num_turns = 0
@@ -211,7 +255,8 @@ class ToolAgentLoop(AgentLoopBase):
         is_full = False
         bootstrap_added = False
         while True:
-            
+            if env_idx == 0:
+                print("turn_idx:", num_turns)
             with simple_timer("generate_sequences", metrics):
                 output = await self.server_manager.generate(
                     request_id=request_id,
@@ -298,9 +343,10 @@ class ToolAgentLoop(AgentLoopBase):
                 None,
                 lambda: self._build_prompt_ids(messages),
             )
-            prompt_ids = self._truncate_prompt_ids(prompt_ids)
             
             is_full = await counter.increment.remote()
+            print(f"env_idx: {env_idx}, num_turns: {num_turns}, is_full: {is_full}, is_val: {is_val}")
+            print("counter.get_batch_size:", await counter.get_batch_size.remote())
             if is_full and not is_val:
                 # Training truncation path: append exactly one bootstrap sample
                 # so output cardinality stays aligned with trainer expectations.

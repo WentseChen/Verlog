@@ -24,13 +24,6 @@ export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS_PER_NODE-1)))
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
 
-PROJECT_DIR="$(pwd)"
-CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
-LOG_PATH="${VERL_AGENT_IO_LOG_PATH:-$PROJECT_DIR/logs/agent_model_train.log}"
-mkdir -p "$(dirname "$LOG_PATH")"
-: > "$LOG_PATH"
-export VERL_AGENT_IO_LOG_PATH="$LOG_PATH"
-
 NUM_ENVS=32
 BATCH_SIZE=256
 MINI_BATCH_SIZE=$((BATCH_SIZE))
@@ -53,7 +46,7 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.return_raw_chat=True \
     actor_rollout_ref.rollout.mode=async \
-    actor_rollout_ref.model.path=Qwen/Qwen2.5-3B-Instruct \
+    actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=${MINI_BATCH_SIZE} \
@@ -78,23 +71,27 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup_batch_repeat_times=40 \
     trainer.critic_warmup_batch_divide_ratio=4 \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name='train.sbatch' \
+    trainer.project_name='one' \
     trainer.experiment_name='ppo_epoch' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=30 \
-    trainer.total_epochs=60 \
+    trainer.total_epochs=3 \
     trainer.val_before_train=True \
     envs.num_envs=${NUM_ENVS} \
-    envs.env_name=babyai \
-    envs.task=BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to \
+    envs.env_name=async_ticker_admissions \
+    +envs.env_config.professor_ids='["prof_1","prof_2","prof_3"]' \
+    +envs.env_config.students_per_batch=2 \
+    +envs.env_config.token_budget=1000 \
+    +envs.env_config.feature_dim=5 \
+    +envs.env_config.vote_threshold=0.5 \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
-    critic.model.path=Qwen/Qwen2.5-3B-Instruct \
+    critic.model.path=Qwen/Qwen2.5-0.5B-Instruct \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_epochs=${PPO_EPOCHS} \
     critic.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \

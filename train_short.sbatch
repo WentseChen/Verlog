@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --partition=gpuA100x4
 #SBATCH --account=bfoz-delta-gpu
-#SBATCH --time=47:59:59
+#SBATCH --time=23:59:59
 #SBATCH --gpus-per-node=4
 
 source /u/aseo/anaconda3/bin/activate 
@@ -23,13 +23,6 @@ export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS_PER_NODE-1)))
 
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
-
-PROJECT_DIR="$(pwd)"
-CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
-LOG_PATH="${VERL_AGENT_IO_LOG_PATH:-$PROJECT_DIR/logs/agent_model_train.log}"
-mkdir -p "$(dirname "$LOG_PATH")"
-: > "$LOG_PATH"
-export VERL_AGENT_IO_LOG_PATH="$LOG_PATH"
 
 NUM_ENVS=32
 BATCH_SIZE=256
@@ -78,7 +71,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup_batch_repeat_times=40 \
     trainer.critic_warmup_batch_divide_ratio=4 \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name='train.sbatch' \
+    trainer.project_name='one' \
     trainer.experiment_name='ppo_epoch' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
