@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=marl
+#SBATCH --job-name=loop
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --mem=200G
@@ -71,18 +71,18 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=True \
     trainer.balance_batch=False \
-    trainer.critic_warmup=10 \
+    trainer.critic_warmup=0 \
     trainer.critic_warmup_batch_repeat_times=40 \
     trainer.critic_warmup_batch_divide_ratio=4 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='interactive' \
-    trainer.experiment_name='marl' \
+    trainer.experiment_name='ppo_epoch' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=30 \
-    trainer.total_epochs=60 \
-    trainer.val_before_train=True \
+    trainer.total_epochs=2 \
+    trainer.val_before_train=False \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=async_ticker_admissions \
     +envs.env_config.professor_ids='["prof_1","prof_2","prof_3"]' \

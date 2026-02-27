@@ -255,8 +255,6 @@ class ToolAgentLoop(AgentLoopBase):
         is_full = False
         bootstrap_added = False
         while True:
-            if env_idx == 0:
-                print("turn_idx:", num_turns)
             with simple_timer("generate_sequences", metrics):
                 output = await self.server_manager.generate(
                     request_id=request_id,
@@ -329,7 +327,7 @@ class ToolAgentLoop(AgentLoopBase):
                 done=done,
                 num_turns=num_turns,
                 env_idx=env_idx,
-                agent_id=agent_id,
+                agent_id=str(agent_id),
                 turn_id=num_turns,
             )
             num_turns += 1
@@ -345,24 +343,24 @@ class ToolAgentLoop(AgentLoopBase):
             )
             
             is_full = await counter.increment.remote()
-            print(f"env_idx: {env_idx}, num_turns: {num_turns}, is_full: {is_full}, is_val: {is_val}")
-            print("counter.get_batch_size:", await counter.get_batch_size.remote())
             if is_full and not is_val:
                 # Training truncation path: append exactly one bootstrap sample
                 # so output cardinality stays aligned with trainer expectations.
-                bootstrap_turn = AgentLoopOutput(
-                    prompt_ids=last_prompt_ids,
-                    response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
-                    response_mask=[1],
-                    metrics=dict(),
-                    rewards=0.0,
-                    done=True,
-                    num_turns=num_turns,
-                    env_idx=env_idx,
-                    agent_id=agent_id,
-                    turn_id=num_turns,
-                )
-                outputs.append(bootstrap_turn)
+                # for loop over all agents
+                for end_agent_id in range(3):
+                    bootstrap_turn = AgentLoopOutput(
+                        prompt_ids=last_prompt_ids,
+                        response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
+                        response_mask=[1],
+                        metrics=dict(),
+                        rewards=0.0,
+                        done=True,
+                        num_turns=num_turns,
+                        env_idx=env_idx,
+                        agent_id=f"prof_{end_agent_id+1}",
+                        turn_id=num_turns,
+                    )
+                    outputs.append(bootstrap_turn)
                 bootstrap_added = True
                 break  # Exit loop after buffer truncation
             else:
@@ -372,19 +370,21 @@ class ToolAgentLoop(AgentLoopBase):
         # Episode completed naturally (not truncated) - add final bootstrap turn
         # This happens when done=True from environment termination
         if not bootstrap_added:
-            bootstrap_turn = AgentLoopOutput(
-                prompt_ids=last_prompt_ids,
-                response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
-                response_mask=[1],
-                metrics=dict(),
-                rewards=reward if is_val else 0.0,
-                done=True,
-                num_turns=num_turns,
-                env_idx=env_idx,
-                agent_id=agent_id,
-                turn_id=num_turns,
-            )
-            outputs.append(bootstrap_turn)
+            # for loop over all agents
+            for end_agent_id in range(3):
+                bootstrap_turn = AgentLoopOutput(
+                    prompt_ids=last_prompt_ids,
+                    response_ids=[outputs[-1].response_ids[0]] if outputs else [151645],
+                    response_mask=[1],
+                    metrics=dict(),
+                    rewards=reward if is_val else 0.0,
+                    done=True,
+                    num_turns=num_turns,
+                    env_idx=env_idx,
+                    agent_id=f"prof_{end_agent_id+1}",
+                    turn_id=num_turns,
+                )
+                outputs.append(bootstrap_turn)
 
         return outputs
 

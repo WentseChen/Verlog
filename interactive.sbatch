@@ -11,9 +11,9 @@
 #SBATCH --time=47:59:59
 #SBATCH --gpus-per-node=4
 
-source /u/aseo/anaconda3/bin/activate 
+source /u/wchen11/anaconda3/bin/activate 
 conda activate verlog
-cd /u/aseo/Verlog
+cd /u/wchen11/maverl/Verlog
 
 ulimit -n 65535
 
@@ -34,10 +34,10 @@ MINI_BATCH_SIZE=$((BATCH_SIZE))
 MICRO_BATCH_SIZE=8
 FORWARD_BATCH_SIZE=$((4 * MICRO_BATCH_SIZE))
 OFFLOAD=false
-PPO_EPOCHS=3
+PPO_EPOCHS=2
 
 export VLLM_USE_V1=1
-export WANDB_API_KEY=5cd6b6564c0f79ebf65ce694e5e3b54b725ff225
+export WANDB_API_KEY=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
 
 python3 -m verl.trainer.main_ppo \
     --config-path="$CONFIG_PATH" \

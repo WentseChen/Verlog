@@ -1178,7 +1178,7 @@ class RayPPOTrainer:
                     batch = batch.repeat(repeat_times=repeat_time)
 
                 gen_batch = self._get_gen_batch(batch)
-                batch = DataProto.concat([batch, batch[-num_envs:]])
+                batch = DataProto.concat([batch, batch[-num_envs:], batch[-num_envs:], batch[-num_envs:]])
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
@@ -1232,6 +1232,8 @@ class RayPPOTrainer:
                             del gen_baseline_batch, gen_baseline_output
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    
+                    # assert batch_size should be equal to real batch size + agent_num * num_envs"
                     batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
