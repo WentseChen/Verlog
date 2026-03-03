@@ -41,9 +41,7 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.utils.rollout_trace import RolloutTraceConfig, rollout_trace_attr, rollout_trace_op
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
-from verl.envs.env_2 import Env
 from verl.envs.environments import make_env
-from verl.envs.captioners import make_captioner
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -472,15 +470,14 @@ class AgentLoopWorker:
             trace_config.get("backend"),
             trace_config.get("token2text", False),
         )
-        
-        env = make_env(self.config.envs.env_name, self.config.envs.task, self.config)
-        captioner = make_captioner(self.config)
-        self.env = Env(self.config.envs.env_name, self.config, env, captioner)
+
+        # Initialize training and validation environments directly via make_env
+        # so that async ticker environments (e.g., AsyncTickerAdmissionsEnv)
+        # are used as-is, without the legacy Env wrapper.
+        self.env = make_env(self.config.envs.env_name, self.config.envs.task, self.config)
         self.env.reset()
-        
-        val_env = make_env(self.config.envs.env_name, self.config.envs.task, self.config)
-        val_captioner = make_captioner(self.config)
-        self.val_env = Env(self.config.envs.env_name, self.config, val_env, val_captioner)
+
+        self.val_env = make_env(self.config.envs.env_name, self.config.envs.task, self.config)
         self.val_env.reset()
 
     async def generate_sequences(self, batch: DataProto, counter, env_idx: int) -> DataProto:
