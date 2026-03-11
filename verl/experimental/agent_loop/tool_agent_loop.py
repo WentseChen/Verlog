@@ -229,6 +229,10 @@ class ToolAgentLoop(AgentLoopBase):
     @rollout_trace_op
     async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool, **kwargs) -> List[AgentLoopOutput]:
         agent_id = kwargs.get("agent_id")
+        # Normalize env.reset outputs to (messages, info) for both legacy Env
+        # wrapper (which already returns messages + info) and new multi-agent
+        # gym-style envs (e.g. AsyncTickerAdmissionsEnv) that return
+        # (observations, infos_dict).
         if is_val:
             messages, info = env.reset(agent_id=agent_id)
         else:

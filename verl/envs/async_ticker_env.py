@@ -684,3 +684,49 @@ class AsyncTickerAdmissionsEnv(gym.Env):
             )
             for agent_id in self.professor_ids
         }
+
+
+class AsyncTickerEnvWrapper(gym.Wrapper):
+    """
+    Wrapper around AsyncTickerAdmissionsEnv that caches the last observation and infos
+    and exposes get_last_obs(agent_id=None) for resuming (e.g. training rollouts).
+    reset() and step() return the same format as the inner env.
+    """
+
+    def __init__(self, env: AsyncTickerAdmissionsEnv):
+        super().__init__(env)
+        self._last_observations: Optional[List[Dict[str, str]]] = None
+        self._last_infos: Optional[Dict[str, Dict]] = None
+
+    def reset(self, agent_id: str | None = None) -> Tuple[List[Dict[str, str]], Dict[str, Dict]]:
+        observations, infos = self.env.reset(agent_id=agent_id)
+        info = infos[self.env.episode_state["active_agent"]]
+        self._last_observations = observations
+        self._last_infos = info
+        return observations, info
+
+    def step(
+        self, action: str | Dict[str, Any]
+    ) -> Tuple[
+        List[Dict[str, str]],
+        Dict[str, float],
+        Dict[str, bool],
+        Dict[str, bool],
+        Dict[str, Dict],
+    ]:
+        observations, rewards, terminations, truncations, infos = self.env.step(action)
+        reward = rewards[self.env.episode_state["active_agent"]]
+        terminated = terminations[self.env.episode_state["active_agent"]]
+        truncated = truncations[self.env.episode_state["active_agent"]]
+        info = infos[self.env.episode_state["active_agent"]]
+        self._last_observations = observations
+        self._last_infos = info
+        return observations, reward, terminated, truncated, info
+
+    def get_last_obs(
+        self, agent_id: str | None = None
+    ) -> Tuple[Optional[List[Dict[str, str]]], Optional[Dict[str, Dict]]]:
+        """Return the last (observations, infos) from the most recent reset() or step()."""
+        if self._last_observations is None or self._last_infos is None:
+            return None, None
+        return self._last_observations, self._last_infos
