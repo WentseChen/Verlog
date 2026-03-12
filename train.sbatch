@@ -11,9 +11,9 @@
 #SBATCH --time=47:59:59
 #SBATCH --gpus-per-node=4
 
-source /u/wchen11/anaconda3/bin/activate 
+source /u/aseo/anaconda3/bin/activate
 conda activate verlog
-cd /u/wchen11/maverl/Verlog
+cd /u/aseo/Verlog
 
 ulimit -n 65535
 
@@ -23,7 +23,7 @@ export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS_PER_NODE-1)))
 
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
-LOG_PATH="${VERL_AGENT_IO_LOG_PATH:-$PROJECT_DIR/logs/agent_model_interactive2.log}"
+LOG_PATH="${VERL_AGENT_IO_LOG_PATH:-$PROJECT_DIR/logs/agent_model_train2.log}"
 mkdir -p "$(dirname "$LOG_PATH")"
 : > "$LOG_PATH"
 export VERL_AGENT_IO_LOG_PATH="$LOG_PATH"
@@ -37,7 +37,7 @@ OFFLOAD=false
 PPO_EPOCHS=2
 
 export VLLM_USE_V1=1
-export WANDB_API_KEY=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
+export WANDB_API_KEY=5cd6b6564c0f79ebf65ce694e5e3b54b725ff225
 
 python3 -m verl.trainer.main_ppo \
     --config-path="$CONFIG_PATH" \
