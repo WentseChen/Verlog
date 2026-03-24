@@ -25,12 +25,12 @@ PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
 MODEL_PATH="Qwen/Qwen2.5-3B-Instruct"
 
-NUM_ENVS=4
-BATCH_SIZE=64
+NUM_ENVS=16
+BATCH_SIZE=256
 MINI_BATCH_SIZE=$((BATCH_SIZE))
-MICRO_BATCH_SIZE=4
+MICRO_BATCH_SIZE=8
 FORWARD_BATCH_SIZE=$((4 * MICRO_BATCH_SIZE))
-OFFLOAD=True
+OFFLOAD=False
 PPO_EPOCHS=2
 
 export VLLM_USE_V1=1
@@ -43,7 +43,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
     data.train_batch_size=${BATCH_SIZE} \
     data.max_prompt_length=2048 \
-    data.max_response_length=1024 \
+    data.max_response_length=512 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
@@ -62,7 +62,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.agent.num_workers=${NUM_ENVS} \
     actor_rollout_ref.rollout.n=1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
@@ -85,9 +85,9 @@ python3 -m verl.trainer.main_ppo \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=alfworld \
     envs.task=pick_and_place_simple \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=16384 \
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=16384 \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
     critic.model.path=${MODEL_PATH} \
@@ -97,10 +97,9 @@ python3 -m verl.trainer.main_ppo \
     critic.ppo_mini_batch_size=${MINI_BATCH_SIZE} \
     critic.model.fsdp_config.param_offload=${OFFLOAD} \
     critic.model.fsdp_config.optimizer_offload=${OFFLOAD} \
-    critic.ppo_max_token_len_per_gpu=8192 \
-    critic.forward_max_token_len_per_gpu=8192 \
+    critic.ppo_max_token_len_per_gpu=16384 \
+    critic.forward_max_token_len_per_gpu=16384 \
     critic.forward_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
     data.train_files=$HOME/data/gsm8k/test.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
-    data.val_batch_size=${BATCH_SIZE} \
     $@

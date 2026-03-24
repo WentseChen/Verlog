@@ -77,6 +77,34 @@ class Counter:
         async with self.lock:
             return self.num_turns >= self.batch_size
 
+@ray.remote
+class AsyncLLMServerLoadBalancer:
+    """Cluster-wide load balancer for async rollout server selection.
+
+    It assigns a rollout `request_id` to a rollout server index such that
+    the number of assigned sessions stays roughly equal across servers.
+    """
+
+    def __init__(self, num_servers: int, max_cache_size: int = 10000):
+        self.num_servers = int(num_servers)
+        if self.num_servers <= 0:
+            raise ValueError(f"num_servers must be > 0, got {self.num_servers}")
+
+        # counts[i] = number of unique request_id sessions assigned to server i
+        self.counts = [0 for _ in range(self.num_servers)]
+        self.request_id_to_server_idx = LRUCache(maxsize=max_cache_size)
+
+    def choose_server_idx(self, request_id: str) -> int:
+        if request_id in self.request_id_to_server_idx:
+            return self.request_id_to_server_idx[request_id]
+
+        # Assign new request_id to the least-loaded server (ties -> first min).
+        idx = min(range(self.num_servers), key=lambda i: self.counts[i])
+        self.counts[idx] += 1
+        self.request_id_to_server_idx[request_id] = idx
+        return idx
+
+
 class AsyncLLMServerManager:
     """
     A class to manage multiple OpenAI compatible LLM servers. This class provides
@@ -84,27 +112,42 @@ class AsyncLLMServerManager:
     - Sticky session: send multi-turn chat completions to same server for automatic prefix caching
     """
 
-    def __init__(self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], max_cache_size: int = 10000):
+    def __init__(
+        self,
+        config: DictConfig,
+        server_handles: list[ray.actor.ActorHandle],
+        server_load_balancer: ray.actor.ActorHandle | None = None,
+        max_cache_size: int = 10000,
+    ):
         """Initialize the AsyncLLMServerManager.
 
         Args:
             config (DictConfig): YAML config.
             server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
+            server_load_balancer (ray.actor.ActorHandle | None): Optional shared balancer actor.
             max_cache_size (int, optional): max cache size for request_id to server mapping. Defaults to 10000.
         """
         self.config = config
         self.server_handles = server_handles
-        random.shuffle(self.server_handles)
+        self.server_load_balancer = server_load_balancer
 
-        # Least requests load balancing
-        self.weighted_serveres = [[0, (hash(server), server)] for server in server_handles]
-        heapq.heapify(self.weighted_serveres)
+        # When using a shared balancer, the ordering of `server_handles` must be stable.
+        if self.server_load_balancer is None:
+            random.shuffle(self.server_handles)
 
-        # LRU cache to map request_id to server
-        self.request_id_to_server = LRUCache(maxsize=max_cache_size)
+            # Least requests load balancing (local-only).
+            self.weighted_serveres = [[0, (hash(server), server)] for server in server_handles]
+            heapq.heapify(self.weighted_serveres)
 
-    def _choose_server(self, request_id: str) -> ray.actor.ActorHandle:
-        # TODO: implement server pressure awareness load balancing
+            # LRU cache to map request_id to server.
+            self.request_id_to_server = LRUCache(maxsize=max_cache_size)
+        else:
+            # Shared balancer handles request routing; keep local selection state disabled.
+            self.weighted_serveres = None
+            self.request_id_to_server = None
+
+    def _choose_server_local(self, request_id: str) -> ray.actor.ActorHandle:
+        """Local least-loaded server selection (used only when no shared balancer is provided)."""
         if request_id in self.request_id_to_server:
             return self.request_id_to_server[request_id]
 
@@ -133,7 +176,12 @@ class AsyncLLMServerManager:
         Returns:
             TokenOutput: token output
         """
-        server = self._choose_server(request_id)
+        if self.server_load_balancer is not None:
+            server_idx = await self.server_load_balancer.choose_server_idx.remote(request_id)
+            server = self.server_handles[server_idx]
+        else:
+            server = self._choose_server_local(request_id)
+
         output = await server.generate.remote(
             request_id=request_id,
             prompt_ids=prompt_ids,
@@ -141,6 +189,7 @@ class AsyncLLMServerManager:
             image_data=image_data,
         )
         return output
+
 
 
 class AgentLoopMetrics(BaseModel):
@@ -423,16 +472,21 @@ class AgentLoopWorker:
     """Agent loop worker takes a batch of messages and run each message in an agent loop."""
 
     def __init__(
-        self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], rm_executor: BatchExecutor = None
+        self,
+        config: DictConfig,
+        server_handles: list[ray.actor.ActorHandle],
+        rm_executor: BatchExecutor = None,
+        server_load_balancer: ray.actor.ActorHandle | None = None,
     ):
         """Initialize agent loop manager.
 
         Args:
             config (DictConfig): YAML config.
             server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
+            server_load_balancer (ray.actor.ActorHandle | None): Optional shared balancer actor.
         """
         self.config = config
-        self.server_manager = AsyncLLMServerManager(config, server_handles)
+        self.server_manager = AsyncLLMServerManager(config, server_handles, server_load_balancer=server_load_balancer)
         self.rm_executor = rm_executor
 
         model_path = config.actor_rollout_ref.model.path
@@ -895,6 +949,7 @@ class AgentLoopManager:
             self._run_all([server.init_standalone() for server in self.rollout_replicas])
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
+        self.server_load_balancer = AsyncLLMServerLoadBalancer.remote(num_servers=len(self.server_handles))
 
     def _init_agent_loop_workers(self):
         self.agent_loop_workers = []
@@ -910,7 +965,7 @@ class AgentLoopManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
-                ).remote(self.config, self.server_handles, self.rm_executor)
+                ).remote(self.config, self.server_handles, self.rm_executor, self.server_load_balancer)
             )
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
