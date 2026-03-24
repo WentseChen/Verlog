@@ -4,6 +4,9 @@ from datasets import load_dataset
 from verl.protocol import DataProto, DataProtoItem
 import numpy as np
 
+import copy
+import random
+        
 def transform_dataproto_to_sample(sample):
     """
     Transform a DataProto or DataProtoItem to the format expected by MMLUEnv.
@@ -17,44 +20,31 @@ def transform_dataproto_to_sample(sample):
     # Handle DataProto - extract first item if it's a batch
     if isinstance(sample, DataProto):
         if len(sample) > 0:
-            sample = sample[0]  # Extract first item as DataProtoItem
+            sample = sample[0]
         else:
             raise ValueError("DataProto is empty")
     
-    # Extract data from non_tensor_batch
     if isinstance(sample, DataProtoItem):
         data = sample.non_tensor_batch
     elif isinstance(sample, dict):
-        # Already a dict, use directly
         data = sample
     else:
         raise TypeError(f"Unsupported sample type: {type(sample)}")
     
-    # Extract required fields
     question = data.get('question', '')
     subject = data.get('subject', '')
     choices_raw = data.get('choices', [])
     answer_raw = data.get('answer', None)
     uid = data.get('uid', '')
     
-    # Transform choices to expected format
-    # If choices is already a dict with 'label' and 'text', use it
-    # Otherwise, assume it's a list of strings and create labels
     if isinstance(choices_raw, dict):
         choices = choices_raw
     elif isinstance(choices_raw, list):
-        # Create labels A, B, C, D for the choices
         labels = ['A', 'B', 'C', 'D'][:len(choices_raw)]
-        choices = {
-            'label': labels,
-            'text': choices_raw
-        }
+        choices = {'label': labels, 'text': choices_raw}
     else:
         raise ValueError(f"Unexpected choices format: {type(choices_raw)}")
     
-    # Transform answer to answerKey
-    # If answer is an integer (0-3), convert to A-D
-    # If answer is already A-D, use it directly
     map_idx_to_label = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
     if answer_raw is None:
         answerKey = 'UNKNOWN'
@@ -63,17 +53,12 @@ def transform_dataproto_to_sample(sample):
     elif isinstance(answer_raw, str) and answer_raw.upper() in ['A', 'B', 'C', 'D']:
         answerKey = answer_raw.upper()
     else:
-        # Try to convert if it's a string representation of int
         try:
             idx = int(answer_raw)
-            if idx in map_idx_to_label:
-                answerKey = map_idx_to_label[idx]
-            else:
-                answerKey = str(answer_raw)
+            answerKey = map_idx_to_label[idx] if idx in map_idx_to_label else str(answer_raw)
         except (ValueError, TypeError):
             answerKey = str(answer_raw)
     
-    # Use uid as id, or generate one if not available
     sample_id = uid if uid else f"mmlu_sample_{hash(str(data))}"
     
     return {
@@ -84,6 +69,61 @@ def transform_dataproto_to_sample(sample):
         'id': sample_id
     }
 
+
+# ---------------------------------------------------------------------------
+# Leakage detection & masking
+# ---------------------------------------------------------------------------
+
+# Patterns that constitute leakage in the dreaming output
+_LEAKAGE_PATTERNS = [
+    # Option labels like "A:", "B.", "Option A", "Choice 2", "Statement X"
+    re.compile(r'\b(?:Option|Choice|Statement|Answer)\s*[A-D1-4]\b', re.IGNORECASE),
+    re.compile(r'\b[A-D]\s*[:\.\)]', re.IGNORECASE),
+    # Explicit answer conclusions
+    re.compile(r'\b(?:the\s+)?(?:correct\s+)?answer\s+is\b', re.IGNORECASE),
+    re.compile(r'\bTherefore[:\s]*[A-D]\b', re.IGNORECASE),
+    re.compile(r'\bThus[:\s]*[A-D]\b', re.IGNORECASE),
+    re.compile(r'\bHence[:\s]*[A-D]\b', re.IGNORECASE),
+    # Bracketed verdicts
+    re.compile(r'\[(?:TRUE|FALSE|CORRECT|INCORRECT|YES|NO)\]', re.IGNORECASE),
+    re.compile(r'\[(?:[A-D])\]'),
+]
+
+# A neutral replacement token that won't disturb tokenizer distributions
+_MASK_TOKEN = "[MASK]"
+
+
+def detect_leakage(text: str) -> tuple[bool, list[str]]:
+    """
+    Detect leakage patterns in the dreaming output.
+
+    Returns:
+        (has_leakage, list_of_matched_strings)
+    """
+    matches = []
+    for pattern in _LEAKAGE_PATTERNS:
+        found = pattern.findall(text)
+        matches.extend(found)
+    return (len(matches) > 0, matches)
+
+
+def mask_leakage(text: str) -> tuple[str, bool, list[str]]:
+    """
+    Replace leakage patterns with _MASK_TOKEN.
+
+    Returns:
+        (masked_text, has_leakage, matched_strings)
+    """
+    has_leakage, matches = detect_leakage(text)
+    masked = text
+    for pattern in _LEAKAGE_PATTERNS:
+        masked = pattern.sub(_MASK_TOKEN, masked)
+    return masked, has_leakage, matches
+
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
 
 class MMLUEnv(gym.Env):
     def __init__(self, config):
@@ -97,31 +137,45 @@ class MMLUEnv(gym.Env):
     def reset(self, sample, seed=None, options=None):
         super().reset(seed=seed)
         
-        # Transform DataProto/DataProtoItem to expected format
         self.current_sample = transform_dataproto_to_sample(sample)
         self.phase = 'dreaming'
         self.z_content = ""
         
         question = self.current_sample['question']
-        subject = self.current_sample['subject'].replace("_", " ").title() # e.g. "College Mathematics"
+        subject = self.current_sample['subject'].replace("_", " ").title()
         
+        choices_raw = self.current_sample['choices']
+        choices_raw_copy = copy.deepcopy(choices_raw)
+        random.shuffle(choices_raw_copy['text'])
         choices_text = "\n".join([f"{l}: {t}" for l, t in zip(
-            self.current_sample['choices']['label'],
-            self.current_sample['choices']['text']
+            choices_raw_copy['label'],
+            choices_raw_copy['text']
         )])
 
         messages = [
             {
                 "role": "system",
                 "content": (
-                    f"You are a creative Knowledge Synthesizer specializing in {{subject}}. Your goal is to write a 'Context Description' that allows a downstream Solver to deduce the correct answer *without* seeing the original question.\n\n"
+                    f"You are a creative Knowledge Synthesizer specializing in {{subject}}. "
+                    "Your goal is to write a 'Context Description' that allows a downstream Solver "
+                    "to deduce the correct answer *without* seeing the original question.\n\n"
                     
                     "**CORE INSTRUCTIONS:**\n"
-                    "1. **Associative & Creative Reasoning**: Do not just list facts. Use lateral thinking to connect {{subject}} concepts with universal mental models or analogies from other fields to reinforce the core logic.\n"
-                    "2. **Implicit Guidance**: Describe the precise conditions, formulas, or historical context that validate the correct option and invalidate others.\n"
-                    "3. **Strict Constraints**: \n"
+                    "1. **Zero Data Leakage**: Completely strip away all original nouns, names, and "
+                    "specific phrasing. Translate the core logic into an entirely different domain "
+                    "(e.g., use fluid dynamics to explain economics, or clockwork mechanisms to "
+                    "explain biology).\n"
+                    "2. **Metaphorical Precision**: Your analogy must mathematically or logically "
+                    "align with the correct answer perfectly, while making the incorrect options "
+                    "impossible within the metaphor's rules.\n"
+                    "3. **Strict Format Constraints** — violations will be penalised:\n"
                     "   - DO NOT repeat the question text.\n"
-                    "   - DO NOT mention the answer letter or explicit option text.\n"
+                    "   - DO NOT mention the answer letter or any explicit option text.\n"
+                    "   - DO NOT use option labels such as 'A:', 'B.', 'Option 1', 'Choice C', "
+                    "or 'Statement X'.\n"
+                    "   - DO NOT write explicit conclusions such as 'The answer is…', "
+                    "'Therefore: C', 'Hence the correct choice is…'.\n"
+                    "   - DO NOT use bracketed verdicts such as '[TRUE]', '[FALSE]', or '[C]'."
                 ).format(subject=subject)
             },
             {
@@ -143,52 +197,46 @@ class MMLUEnv(gym.Env):
         truncated = False
         info = {}
         
-        # --- Helper: Extract Thought vs Content ---
         def _parse_output(text):
             end_tag = "</think>"
-            
             end_idx = text.find(end_tag)
-            
             if end_idx != -1:
-                thought_part = text[:end_idx]
-                thought_content = thought_part.replace("<think>", "").strip()
-                
-                raw_content = text[end_idx + len(end_tag):]
-                
-                z_content = raw_content.lstrip('\r\n')
-                
+                thought_content = text[:end_idx].replace("<think>", "").strip()
+                z_content = text[end_idx + len(end_tag):].lstrip('\r\n')
                 if not z_content:
-                     z_content = "No context generated."
+                    z_content = "No context generated."
             else:
                 thought_content = ""
                 z_content = text.lstrip('\r\n') 
-                
             return thought_content, z_content
 
         if self.phase == 'dreaming':
             raw_output = action_text
-            # z_content is now the entire response (no parsing needed)
-            self.z_content = raw_output
-            
-            if not self.z_content:
-                self.z_content = "No context generated."
+            raw_z = raw_output.lstrip('\r\n') or "No context generated."
 
+            # Leakage detection & masking
+            masked_z, has_leakage, leakage_matches = mask_leakage(raw_z)
+            self.z_content = masked_z
+            
             self.phase = 'answering'
             
             choices = self.current_sample['choices']
             choice_str = "\n".join([f"{l}: {t}" for l, t in zip(choices['label'], choices['text'])])
             subject = self.current_sample['subject'].replace("_", " ").title()
 
-            # --- MODIFIED: Solver Prompt for MMLU ---
             messages = [
                 {
                     "role": "system", 
                     "content": (
-                        f"You are an expert in {{subject}}. You will be given a 'Context Description' (a scenario, derivation, or set of facts) and a list of Options.\n"
+                        f"You are an expert in {{subject}}. You will be given a 'Context Description' "
+                        "(a scenario, derivation, or set of facts) and a list of Options.\n"
                         "INSTRUCTIONS:\n"
-                        "1. Read the Context Description carefully. It describes the solution path or the unique properties of the correct answer.\n"
-                        "2. Select the option that best matches the description or completes the logic derived from the context.\n"
-                        "3. Analyze inside <think>...</think> tags, then output ONLY the single capital letter label (A, B, C, or D)."
+                        "1. Read the Context Description carefully. It describes the solution path "
+                        "or the unique properties of the correct answer.\n"
+                        "2. Select the option that best matches the description or completes the "
+                        "logic derived from the context.\n"
+                        "3. Analyze inside <think>...</think> tags, then output ONLY the single "
+                        "capital letter label (A, B, C, or D)."
                     ).format(subject=subject)
                 },
                 {
@@ -203,21 +251,17 @@ class MMLUEnv(gym.Env):
             
             info = {
                 "raw_dream_output": raw_output,
-                # Store answering phase messages and z_content as strings
-                # They will be tokenized in tool_agent.py
                 "answering_messages": messages,
                 "z_content": self.z_content,
                 "temperature": 0.1,
                 "max_tokens": 2048,
                 "phase": "answering",
-                "metrics": {},
+                "metrics": {
+                    "dreaming/has_leakage": int(has_leakage),
+                    "dreaming/leakage_count": len(leakage_matches),
+                },
             }
             
-            # # Debug prints
-            # print(f"Subject: {subject}")
-            # print(f"Q: {self.current_sample['question']}")
-            # print(f"Dream: {self.z_content}")
-            # print("-"*20)
             return messages, reward, done, truncated, info
             
         elif self.phase == 'answering':
@@ -242,14 +286,9 @@ class MMLUEnv(gym.Env):
                 "metrics": {},
             }
             
-            # print("Answering Phase:")
-            # print("Answer Thought:", answer_thought)
-            # print(f"Prediction: {pred_label} | Truth: {true_label} | Reward: {reward}")
-            
             return None, reward, done, truncated, info
 
     def _extract_answer(self, text):
-        # MMLU 只有 A, B, C, D
         match = re.search(r'\b([A-D])\b', text.upper())
         if match:
             return match.group(1)

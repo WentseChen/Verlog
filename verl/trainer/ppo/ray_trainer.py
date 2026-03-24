@@ -1340,6 +1340,13 @@ class RayPPOTrainer:
                         batch.batch['token_level_scores'] = torch.zeros_like(batch.batch['response_mask'], dtype=torch.float64)
                         rewards = batch.batch['rewards'].to(torch.float64)
                         batch.batch['token_level_scores'][indices, seq_len] = rewards.clone()
+                        # batch.batch['token_level_scores'][indices].cumsum(dim=-1)
+                        batch.batch['token_level_scores'] = (
+                            batch.batch['token_level_scores']
+                            .flip(dims=[-1])
+                            .cumsum(dim=-1)
+                            .flip(dims=[-1])
+                        ) * batch.batch['response_mask']
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})

@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
-#SBATCH --partition=gpuA100x4
+#SBATCH --partition=gpuA40x4
 #SBATCH --account=bfoz-delta-gpu
 #SBATCH --time=47:59:59
 #SBATCH --gpus-per-node=4
@@ -23,14 +23,14 @@ export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS_PER_NODE-1)))
 
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
-MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_PATH="Qwen/Qwen3-4B-Instruct-2507"
 
 NUM_ENVS=4
 BATCH_SIZE=64
 MINI_BATCH_SIZE=$((BATCH_SIZE))
-MICRO_BATCH_SIZE=8
+MICRO_BATCH_SIZE=4
 FORWARD_BATCH_SIZE=$((4 * MICRO_BATCH_SIZE))
-OFFLOAD=false
+OFFLOAD=True
 PPO_EPOCHS=2
 
 export VLLM_USE_V1=1
@@ -40,8 +40,8 @@ python3 -m verl.trainer.main_ppo \
     --config-name='gsm8k_multiturn_grpo' \
     algorithm.adv_estimator=gae \
     data.train_batch_size=${BATCH_SIZE} \
-    data.max_prompt_length=3072 \
-    data.max_response_length=2048 \
+    data.max_prompt_length=2048 \
+    data.max_response_length=1024 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
@@ -68,7 +68,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=True \
     algorithm.kl_ctrl.kl_coef=0.1 \
     trainer.balance_batch=True \
-    trainer.critic_warmup=1 \
+    trainer.critic_warmup=0 \
     trainer.critic_warmup_batch_repeat_times=1 \
     trainer.critic_warmup_batch_divide_ratio=1 \
     trainer.logger='["console","wandb"]' \

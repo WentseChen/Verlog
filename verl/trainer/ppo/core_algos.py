@@ -257,7 +257,7 @@ def compute_gae_advantage_return(
             nextvalues = 0.0
             lastgaelam = 0.0
             # Method 1: concise version
-            token_adv = token_level_rewards[:, t:].sum(-1) + nextvalues - values[:, t] + lastgaelam 
+            token_adv = token_level_rewards[:, t] + nextvalues - values[:, t] + lastgaelam 
             advantages_reversed.append(token_adv)
 
             # Method 2: classic version
