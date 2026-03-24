@@ -27,6 +27,7 @@ class HistoryPromptBuilder:
         max_image_history: int = 1,
         system_prompt: Optional[str] = None,
         max_cot_history: int = 1,
+        hint4loop_state: bool = False,
     ):
         self.max_text_history = max_text_history
         self.max_image_history = max_image_history
@@ -36,6 +37,7 @@ class HistoryPromptBuilder:
         self._last_short_term_obs = None  # To store the latest short-term observation
         self.previous_reasoning = None
         self.max_cot_history = max_cot_history
+        self.hint4loop_state = hint4loop_state
 
     def update_instruction_prompt(self, instruction: str):
         """Set the system-level instruction prompt."""
@@ -125,6 +127,17 @@ class HistoryPromptBuilder:
                     message_parts.append("Current Observation:")
                     if self._last_short_term_obs:
                         message_parts.append(self._last_short_term_obs)
+                    
+                    # add a hint if the previous action seems to be stuck
+                    if self.hint4loop_state:
+                        if idx >= 2 and idx - 2 < len(self._events):
+                            prev_event = self._events[idx - 2]
+                            if prev_event["type"] == "observation":
+                                current_text = event.get("text", "")
+                                prev_text = prev_event.get("text", "")
+                                if current_text == prev_text and current_text:
+                                    message_parts.insert(0, "\n[Hint: Your previous action doesn't seem to be working. Try a different strategy or action.]\n")
+                    
                 else:
                     message_parts.append("Observation:")
 

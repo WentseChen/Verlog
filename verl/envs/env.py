@@ -1,4 +1,8 @@
-class Env:
+
+from verl.envs.environments import make_env
+from verl.envs.captioners import make_captioner
+
+class BalrogEnv:
     def __init__(self, env_name, config, env, captioner):
         self.env_name = env_name
         self.config = config
@@ -19,7 +23,7 @@ class Env:
         inst_prompt = self.env.get_instruction_prompt(instructions=instructions, info=info)
         self.captioner.prompt_builder.update_instruction_prompt(inst_prompt)
         self.captioner.update_action(full_action, executed_action)
-        info["metrics"] = metrics
+        info["metrics"] = {**info.get("metrics", {}), **metrics}
         obs = self.captioner.get_obs(env_obs)
         # Auto-reset if episode ends
         if terminated or truncated:
@@ -50,3 +54,8 @@ class Env:
     
     def close(self):
         self.env.close()
+
+def get_balrog_env(config):
+    env = make_env(config.envs.env_name, config.envs.task, config)
+    captioner = make_captioner(config)
+    return BalrogEnv(config.envs.env_name, config, env, captioner)

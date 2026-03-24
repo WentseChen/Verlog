@@ -945,6 +945,7 @@ class DataProto:
         if data:
             # Merge non-metric meta_info and aggregate metrics from all workers.
             all_metrics = []
+            all_infos = []
             for d in data:
                 for k, v in d.meta_info.items():
                     if k == "metrics":
@@ -953,6 +954,12 @@ class DataProto:
                                 all_metrics.extend(v)
                             else:
                                 all_metrics.append(v)
+                    elif k == "infos":
+                        if v is not None:
+                            if isinstance(v, list):
+                                all_infos.extend(v)
+                            else:
+                                all_infos.append(v)
                     else:
                         if k in merged_meta_info:
                             # Ensure consistency for overlapping non-metric keys
@@ -963,6 +970,7 @@ class DataProto:
             # Flatten list of dicts to dict of lists for consistent metrics structure
             if all_metrics:
                 merged_meta_info["metrics"] = list_of_dict_to_dict_of_list(all_metrics)
+                merged_meta_info["infos"] = list_of_dict_to_dict_of_list(all_infos)
 
         cls = type(data[0]) if len(data) > 0 else DataProto
         return cls(batch=new_batch, non_tensor_batch=non_tensor_batch, meta_info=merged_meta_info)
