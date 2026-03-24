@@ -34,6 +34,8 @@ class EnvWrapper(gym.Wrapper):
             obs = obs
         elif self.env_name == "textworld":
             obs = obs
+        elif self.env_name == "alfworld":
+            obs = obs
         elif self.env_name == "babaisai":
             obs = obs
         elif self.env_name == "crafter":
@@ -66,6 +68,10 @@ class EnvWrapper(gym.Wrapper):
             return get_instruction_prompt(self.env, mission=instructions)
         elif self.env_name == "textworld":
             from verl.envs.environments.textworld import get_instruction_prompt
+
+            return get_instruction_prompt(self.env, self.task_name)
+        elif self.env_name == "alfworld":
+            from verl.envs.environments.alfworld import get_instruction_prompt
 
             return get_instruction_prompt(self.env, self.task_name)
         elif self.env_name == "babaisai":

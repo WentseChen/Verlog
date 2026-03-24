@@ -398,3 +398,12 @@ envs:
     save_ttyrec_every: 0
     autopickup: False           
     skip_more: True
+
+  alfworld_kwargs:
+
+    # ALFWorld backend: "AlfredTWEnv" (text) or "AlfredThorEnv" (vision)
+    env_type: AlfredTWEnv
+
+    # evaluation split selector used by ALFWorld internals
+    # options commonly include "train", "eval_in_distribution", "eval_out_of_distribution"
+    eval_dataset: eval_in_distribution

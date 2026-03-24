@@ -1,0 +1,58 @@
+dataset:
+  data_path: '$ALFWORLD_DATA/json_2.1.1/train'
+  eval_id_data_path: '$ALFWORLD_DATA/json_2.1.1/valid_seen'
+  eval_ood_data_path: '$ALFWORLD_DATA/json_2.1.1/valid_unseen'
+  num_train_games: -1
+  num_eval_games: -1
+
+logic:
+  domain: '$ALFWORLD_DATA/logic/alfred.pddl'
+  grammar: '$ALFWORLD_DATA/logic/alfred.twl2'
+
+env:
+  type: 'AlfredTWEnv'
+  domain_randomization: False
+  task_types: [1, 2, 3, 4, 5, 6]
+  expert_timeout_steps: 150
+  expert_type: "handcoded"
+  goal_desc_human_anns_prob: 0.0
+
+  hybrid:
+    start_eps: 100000
+    thor_prob: 0.5
+    eval_mode: "tw"
+
+  thor:
+    screen_width: 300
+    screen_height: 300
+    smooth_nav: False
+    save_frames_to_disk: False
+    save_frames_path: './videos/'
+
+controller:
+  type: 'oracle'
+  debug: False
+  load_receps: True
+
+mask_rcnn:
+  pretrained_model_path: '$ALFWORLD_DATA/detectors/mrcnn.pth'
+
+general:
+  random_seed: 42
+  use_cuda: True
+  visdom: False
+  task: 'alfred'
+  training_method: 'dagger'
+  save_path: './training/'
+  observation_pool_capacity: 3
+  hide_init_receptacles: False
+
+dagger:
+  action_space: "generation"
+  max_target_length: 20
+  beam_width: 10
+  generate_top_k: 5
+  unstick_by_beam_search: False
+
+  training:
+    max_nb_steps_per_episode: 50

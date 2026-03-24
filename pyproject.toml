@@ -110,4 +110,5 @@ verl = [
   "version/*",
   "trainer/config/*.yaml",
   "trainer/config/*/*.yaml",
+  "envs/environments/alfworld/configs/*.yaml",
 ]

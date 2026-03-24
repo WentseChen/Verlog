@@ -39,6 +39,10 @@ def make_env(env_name, task, config, render_mode=None):
         from verl.envs.environments.textworld.textworld_env import make_textworld_env
 
         base_env = make_textworld_env(env_name, task, config, render_mode=render_mode)
+    elif env_name == "alfworld":
+        from verl.envs.environments.alfworld.alfworld_env import make_alfworld_env
+
+        base_env = make_alfworld_env(env_name, task, config, render_mode=render_mode)
     elif env_name == "babaisai":
         from verl.envs.environments.babaisai.babaisai_env import make_babaisai_env
         base_env = make_babaisai_env(env_name, task, config, render_mode=render_mode)
