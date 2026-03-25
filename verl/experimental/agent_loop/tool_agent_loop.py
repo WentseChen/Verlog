@@ -106,6 +106,8 @@ class ToolAgentLoop(AgentLoopBase):
         cls.prompt_length = config.actor_rollout_ref.rollout.prompt_length
         cls.response_length = config.actor_rollout_ref.rollout.response_length
         cls.io_log_path = os.getenv("VERL_AGENT_IO_LOG_PATH", "logs/agent_model_io5.log")
+        cls.game_log_path = os.getenv("VERL_GAME_LOG_PATH", None)
+        cls.game_log_interval = int(os.getenv("VERL_GAME_LOG_INTERVAL", "10"))
         cls.system_prompt = tokenizer.apply_chat_template(
             [{}], add_generation_prompt=False, tokenize=True, **cls.apply_chat_template_kwargs
         )
@@ -122,7 +124,7 @@ class ToolAgentLoop(AgentLoopBase):
         agent_id: str | None,
         prompt_ids: list[int],
         response_ids: list[int],
-    ) -> None:
+    ) -> str:
         prompt_text = self.tokenizer.decode(prompt_ids, skip_special_tokens=False)
         response_text = self.tokenizer.decode(response_ids, skip_special_tokens=False)
         timestamp = datetime.utcnow().isoformat(timespec="seconds")
@@ -137,6 +139,8 @@ class ToolAgentLoop(AgentLoopBase):
         log_file.parent.mkdir(parents=True, exist_ok=True)
         with log_file.open("a", encoding="utf-8") as f:
             f.write(log_block)
+
+        return log_block
 
     def _build_prompt_ids(self, messages: list[dict[str, Any]]) -> list[int]:
         """Build prompt ids while preserving the initial system prompt when truncating."""
@@ -186,6 +190,34 @@ class ToolAgentLoop(AgentLoopBase):
 
         if best_ids is not None:
             if best_start_idx and best_start_idx > 0:
+                # System-only fit but system + user observation didn't.
+                # Try left-truncating the user content to keep as much recent
+                # conversation history as possible (drop oldest entries).
+                if tail_messages and tail_messages[-1].get("role") == "user":
+                    user_msg = tail_messages[-1]
+                    user_ids_raw = self.tokenizer.encode(
+                        user_msg["content"], add_special_tokens=False
+                    )
+                    # Budget for user content: prompt_length minus system-only token
+                    # count, minus a small buffer for chat-template overhead tokens
+                    # (im_start/im_end for the user turn, ~15 tokens).
+                    available = self.prompt_length - len(best_ids) - 15
+                    if available > 0 and len(user_ids_raw) > available:
+                        truncated_content = self.tokenizer.decode(
+                            user_ids_raw[-available:], skip_special_tokens=False
+                        )
+                        candidate_msgs = prefix_messages + [
+                            {**user_msg, "content": truncated_content}
+                        ]
+                        candidate_ids = _tokenize(candidate_msgs)
+                        if len(candidate_ids) <= self.prompt_length:
+                            logger.warning(
+                                "User observation left-truncated to fit prompt_length; "
+                                "oldest conversation history dropped (%d → %d user tokens).",
+                                len(user_ids_raw),
+                                available,
+                            )
+                            return candidate_ids
                 logger.warning(
                     "Prompt exceeded prompt_length; dropped %d oldest non-system messages.",
                     best_start_idx,
@@ -227,7 +259,7 @@ class ToolAgentLoop(AgentLoopBase):
         return False
 
     @rollout_trace_op
-    async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool, **kwargs) -> List[AgentLoopOutput]:
+    async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool, global_steps: int = -1, epoch: int = -1, **kwargs) -> List[AgentLoopOutput]:
         agent_id = kwargs.get("agent_id")
         # Normalize env.reset outputs to (messages, info) for both legacy Env
         # wrapper (which already returns messages + info) and new multi-agent
@@ -239,9 +271,9 @@ class ToolAgentLoop(AgentLoopBase):
             messages, info = env.get_last_obs(agent_id=agent_id)
             if not messages:
                 messages, info = env.reset(agent_id=agent_id)
-        if info and info.get("agent_id") is not None:
-            agent_id = info.get("agent_id")
-            
+        if info and info.get("active_agent") is not None:
+            agent_id = info.get("active_agent")
+
         metrics = {}
         request_id = uuid4().hex
         
@@ -258,6 +290,13 @@ class ToolAgentLoop(AgentLoopBase):
         reward = 0.0
         is_full = False
         bootstrap_added = False
+        game_entries = []
+        log_this_game = (
+            self.game_log_path is not None
+            and env_idx == 0
+            and epoch >= 0
+            and epoch % self.game_log_interval == 0
+        )
         while True:
             with simple_timer("generate_sequences", metrics):
                 output = await self.server_manager.generate(
@@ -282,7 +321,7 @@ class ToolAgentLoop(AgentLoopBase):
                 None,
                 lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
             )
-            await self.loop.run_in_executor(
+            log_entry = await self.loop.run_in_executor(
                 None,
                 lambda: self._append_step_io_log(
                     env_idx=env_idx,
@@ -292,6 +331,8 @@ class ToolAgentLoop(AgentLoopBase):
                     response_ids=response_ids,
                 ),
             )
+            if log_this_game:
+                game_entries.append(log_entry)
             if agent_id is not None:
                 actions = {agent_id: actions}
             
@@ -304,8 +345,8 @@ class ToolAgentLoop(AgentLoopBase):
             observation = copy.deepcopy(messages)
             
             messages, reward, terminated, truncated, info = env.step(actions)
-            if info and info.get("agent_id") is not None:
-                agent_id = info.get("agent_id")
+            if info and info.get("active_agent") is not None:
+                agent_id = info.get("active_agent")
             done = np.logical_or(terminated, truncated)
             
             # Detect loop: check if the observation contains a hint (for both val and training)
@@ -314,7 +355,9 @@ class ToolAgentLoop(AgentLoopBase):
                 all_loop_counts += 1
             
             # Update metrics with info and loop tracking
-            metrics.update(info.get("metrics", {}))
+            step_env_metrics = info.get("metrics", {})
+            if step_env_metrics:
+                metrics["env_metrics"] = step_env_metrics
             metrics["loop_counts"] = 1.0 if is_loop else 0.0
             metrics["loop_rate"] = all_loop_counts / (num_turns + 1) if (num_turns + 1) > 0 else 0.0
             
@@ -389,6 +432,17 @@ class ToolAgentLoop(AgentLoopBase):
                     turn_id=num_turns,
                 )
                 outputs.append(bootstrap_turn)
+
+        if game_entries:
+            header = (
+                f"\n{'='*70}\n"
+                f"=== GAME LOG epoch={epoch} global_steps={global_steps} env={env_idx} ===\n"
+                f"{'='*70}\n"
+            )
+            game_log_file = Path(self.game_log_path)
+            game_log_file.parent.mkdir(parents=True, exist_ok=True)
+            with game_log_file.open("a", encoding="utf-8") as f:
+                f.write(header + "".join(game_entries))
 
         return outputs
 

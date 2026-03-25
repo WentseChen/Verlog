@@ -63,9 +63,6 @@ class TimeManager:
 
         wait_info format:
           - {"condition_type": "any_response", "wait_issued_at": ticker}
-          - {"condition_type": "agent_specific",
-             "target_agent": agent_id,
-             "wait_issued_at": ticker}
         """
         self.waiting_agents[agent_id] = dict(wait_info)
 
@@ -82,39 +79,11 @@ class TimeManager:
         wait_info: Dict[str, Any],
         message_history: List[Dict[str, Any]],
     ) -> bool:
-        """Mirror the original _is_wait_satisfied semantics from env.py."""
+        """A wait is satisfied once any other agent acts after the wait was issued."""
         if not message_history:
             return False
-
         last_message = message_history[-1]
-
-        if wait_info["condition_type"] == "any_response":
-            return last_message["ticker_time"] > wait_info["wait_issued_at"]
-
-        if wait_info["condition_type"] == "agent_specific":
-            target_agent = wait_info["target_agent"]
-            wait_issued_at = wait_info["wait_issued_at"]
-
-            # Find the last message from the target agent
-            target_last_message = None
-            for msg in reversed(message_history):
-                if msg["agent_id"] == target_agent:
-                    target_last_message = msg
-                    break
-
-            # Constraint: if target agent's last message happened at or before
-            # wait_issued_at, the wait cannot be satisfied.
-            if target_last_message is not None:
-                if target_last_message["ticker_time"] <= wait_issued_at:
-                    return False
-
-            # Check if target agent has spoken after the wait was issued
-            return (
-                last_message["agent_id"] == target_agent
-                and last_message["ticker_time"] > wait_issued_at
-            )
-
-        return False
+        return last_message["ticker_time"] > wait_info["wait_issued_at"]
 
     def get_next_agent(self, public_message_history: List[Dict[str, Any]]) -> str:
         """
@@ -175,4 +144,3 @@ class TimeManager:
 
         candidates.sort()
         return candidates[0][1]
-

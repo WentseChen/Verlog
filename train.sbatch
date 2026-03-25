@@ -2,11 +2,11 @@
 #SBATCH --job-name=marl
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
-#SBATCH --mem=200G
+#SBATCH --mem=240G
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
-#SBATCH --partition=gpuA100x4
+#SBATCH --partition=gpuA40x4
 #SBATCH --account=bfoz-delta-gpu
 #SBATCH --time=47:59:59
 #SBATCH --gpus-per-node=4
@@ -23,10 +23,11 @@ export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS_PER_NODE-1)))
 
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
-LOG_PATH="${VERL_AGENT_IO_LOG_PATH:-$PROJECT_DIR/logs/agent_model_train2.log}"
+LOG_PATH="${VERL_AGENT_IO_LOG_PATH:-$PROJECT_DIR/logs/agent_model_train.log}"
 mkdir -p "$(dirname "$LOG_PATH")"
 : > "$LOG_PATH"
 export VERL_AGENT_IO_LOG_PATH="$LOG_PATH"
+export VERL_GAME_LOG_PATH="$PROJECT_DIR/logs/game_log_train.log"
 
 NUM_ENVS=32
 BATCH_SIZE=256
@@ -44,7 +45,7 @@ python3 -m verl.trainer.main_ppo \
     --config-name='gsm8k_multiturn_grpo' \
     algorithm.adv_estimator=gae \
     data.train_batch_size=${BATCH_SIZE} \
-    data.max_prompt_length=1024 \
+    data.max_prompt_length=4096 \
     data.max_response_length=512 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
@@ -86,10 +87,11 @@ python3 -m verl.trainer.main_ppo \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=async_ticker_admissions \
     +envs.env_config.professor_ids='["prof_1","prof_2","prof_3"]' \
-    +envs.env_config.students_per_batch=2 \
+    +envs.env_config.students_per_batch=5 \
     +envs.env_config.token_budget=1000 \
     +envs.env_config.feature_dim=5 \
     +envs.env_config.vote_threshold=0.5 \
+    +envs.env_config.max_steps=100 \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \

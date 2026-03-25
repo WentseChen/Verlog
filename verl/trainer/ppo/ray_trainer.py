@@ -1182,6 +1182,7 @@ class RayPPOTrainer:
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
+                gen_batch.meta_info["epoch"] = epoch
                 gen_batch.meta_info["batch_size"] = len(gen_batch.batch)
                 gen_batch.meta_info["num_envs"] = num_envs
                 

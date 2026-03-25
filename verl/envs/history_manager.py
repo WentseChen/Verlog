@@ -141,7 +141,11 @@ class HistoryManager:
         student_batch: List[Dict[str, Any]],
         professor_interest_vector: np.ndarray,
         feature_dim: int,
-    ) -> str:
+        max_prompt_words: int | None = None,
+        max_prompt_tokens: int | None = None,
+        tokenizer=None,
+        current_votes: Dict[str, int] | None = None,
+    ) -> tuple[str, bool]:
         """
         Build the *user* turn content string for the given agent.
 
@@ -162,10 +166,6 @@ class HistoryManager:
                 conversation_lines.append(
                     f"[{msg['agent_id']} at t={msg['ticker_time']}]: {msg['text']}"
                 )
-
-        conversation_text = (
-            "\n".join(conversation_lines) if conversation_lines else "(No messages yet)"
-        )
 
         # Build public student table (ability vectors visible to all)
         topic_names = ["AI/ML", "Systems", "Theory", "HCI", "CompBio"]
@@ -190,6 +190,81 @@ class HistoryManager:
             )
         students_text = "\n".join(student_lines)
 
+        # If a word budget is set, drop oldest messages until history fits.
+        # This preserves message boundaries and keeps the header/footer intact.
+        # Build vote tally block
+        if current_votes:
+            vote_lines = []
+            for prof, student_idx in current_votes.items():
+                student_name = (
+                    student_batch[student_idx]["name"]
+                    if 0 <= student_idx < len(student_batch)
+                    else f"#{student_idx}"
+                )
+                vote_lines.append(f"  {prof} -> {student_name} (index {student_idx})")
+            votes_text = "\n".join(vote_lines)
+        else:
+            votes_text = "  (no votes cast yet)"
+
+        was_truncated = False
+        if max_prompt_tokens is not None and tokenizer is not None:
+            # Token-based trimming: measure fixed header/footer tokens exactly,
+            # then drop oldest history lines until everything fits.
+            fixed_text = (
+                f"=== YOUR TURN (t={current_ticker}) ===\n\n"
+                f"STUDENTS — PUBLIC ABILITY VECTORS (sum = 1.0 per student):\n"
+                f"{students_text}\n\n"
+                f"NOTE: The ability vectors above are visible to ALL professors. "
+                f"Your utility column is computed privately from your preference vector "
+                f"and is NOT visible to others.\n\n"
+                f"Token budget used: {token_budget_used}/{token_budget} "
+                f"(only <GROUP> messages consume budget; <THINK> is free)\n\n"
+                f"CURRENT VOTE TALLY:\n{votes_text}\n\n"
+                f"CONVERSATION HISTORY (chronological by ticker time):\n"
+                f"(No messages yet)\n\n"
+                f"Your turn (remember: start with <THINK>your reasoning</THINK>, then your action):"
+            )
+            fixed_tokens = len(tokenizer.encode(fixed_text, add_special_tokens=False))
+            history_budget = max_prompt_tokens - fixed_tokens
+            # Pre-tokenize each line once, then greedily drop oldest until within budget.
+            line_token_counts = [
+                len(tokenizer.encode(line, add_special_tokens=False))
+                for line in conversation_lines
+            ]
+            total_tokens = sum(line_token_counts)
+            # Add 1 token per line for the "\n" separator between lines.
+            total_tokens += len(line_token_counts)
+            while conversation_lines and total_tokens > history_budget:
+                total_tokens -= line_token_counts[0] + 1
+                line_token_counts.pop(0)
+                conversation_lines.pop(0)
+                was_truncated = True
+        elif max_prompt_words is not None:
+            # Legacy word-based trimming (fallback when no tokenizer is available).
+            fixed_text = (
+                f"=== YOUR TURN (t={current_ticker}) ===\n\n"
+                f"STUDENTS — PUBLIC ABILITY VECTORS (sum = 1.0 per student):\n"
+                f"{students_text}\n\n"
+                f"NOTE: The ability vectors above are visible to ALL professors. "
+                f"Your utility column is computed privately from your preference vector "
+                f"and is NOT visible to others.\n\n"
+                f"Token budget used: {token_budget_used}/{token_budget} "
+                f"(only <GROUP> messages consume budget; <THINK> is free)\n\n"
+                f"CURRENT VOTE TALLY:\n{votes_text}\n\n"
+                f"CONVERSATION HISTORY (chronological by ticker time):\n"
+                f"\n\n"
+                f"Your turn:"
+            )
+            fixed_words = len(fixed_text.split())
+            history_budget = max_prompt_words - fixed_words
+            while conversation_lines and len(" ".join(conversation_lines).split()) > history_budget:
+                conversation_lines.pop(0)
+                was_truncated = True
+
+        conversation_text = (
+            "\n".join(conversation_lines) if conversation_lines else "(No messages yet)"
+        )
+
         obs = (
             f"=== YOUR TURN (t={current_ticker}) ===\n\n"
             f"STUDENTS — PUBLIC ABILITY VECTORS (sum = 1.0 per student):\n"
@@ -199,8 +274,9 @@ class HistoryManager:
             f"and is NOT visible to others.\n\n"
             f"Token budget used: {token_budget_used}/{token_budget} "
             f"(only <GROUP> messages consume budget; <THINK> is free)\n\n"
+            f"CURRENT VOTE TALLY:\n{votes_text}\n\n"
             f"CONVERSATION HISTORY (chronological by ticker time):\n{conversation_text}\n\n"
             f"Your turn (remember: start with <THINK>your reasoning</THINK>, then your action):"
         )
-        return obs
 
+        return obs, was_truncated

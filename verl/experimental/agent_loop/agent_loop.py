@@ -28,7 +28,7 @@ import ray
 import torch
 from cachetools import LRUCache
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
@@ -149,6 +149,7 @@ class AgentLoopMetrics(BaseModel):
     tool_calls: float = 0.0
     loop_counts: int = 0
     loop_rate: float = 0.0
+    env_metrics: dict = Field(default_factory=dict)
 
 
 class AgentLoopOutput(BaseModel):
@@ -474,10 +475,10 @@ class AgentLoopWorker:
         # Initialize training and validation environments directly via make_env
         # so that async ticker environments (e.g., AsyncTickerAdmissionsEnv)
         # are used as-is, without the legacy Env wrapper.
-        self.env = make_env(self.config.envs.env_name, self.config.envs.task, self.config)
+        self.env = make_env(self.config.envs.env_name, self.config.envs.task, self.config, tokenizer=self.tokenizer)
         self.env.reset()
 
-        self.val_env = make_env(self.config.envs.env_name, self.config.envs.task, self.config)
+        self.val_env = make_env(self.config.envs.env_name, self.config.envs.task, self.config, tokenizer=self.tokenizer)
         self.val_env.reset()
 
     async def generate_sequences(self, batch: DataProto, counter, env_idx: int) -> DataProto:
@@ -528,11 +529,12 @@ class AgentLoopWorker:
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
 
+        epoch = batch.meta_info.get("epoch", -1)
         tasks = []
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             is_val = batch.meta_info.get("validate", False)
-            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], counter, env_idx, is_val, **kwargs)))
+            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], counter, env_idx, is_val, epoch=epoch, **kwargs)))
         outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(outputs[0])
@@ -569,7 +571,7 @@ class AgentLoopWorker:
                 processor=self.processor,
             )
             env = self.val_env if is_val else self.env
-            outputs: AgentLoopOutput = await agent_loop.run(env, counter, env_idx, sampling_params, is_val, **kwargs)
+            outputs: AgentLoopOutput = await agent_loop.run(env, counter, env_idx, sampling_params, is_val, global_steps=trajectory["step"], **kwargs)
 
             # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
 
@@ -995,6 +997,15 @@ class AgentLoopManager:
         loop_stats["agent_loop/loop_counts/max"] = loop_counts.max()
         loop_stats["agent_loop/loop_counts/mean"] = loop_counts.mean()
         loop_stats["agent_loop/loop_counts/std"] = loop_counts.std()
+
+        # Aggregate env metrics (only present on done steps, one per episode)
+        all_env_metrics = [m.get("env_metrics", {}) for chunk in metrics for m in chunk]
+        all_env_metrics = [em for em in all_env_metrics if em]
+        if all_env_metrics:
+            for key in all_env_metrics[0].keys():
+                values = [m[key] for m in all_env_metrics if key in m and isinstance(m[key], (int, float))]
+                if values:
+                    loop_stats[f"env/{key}"] = float(np.mean(values))
 
         return timing, loop_stats
 

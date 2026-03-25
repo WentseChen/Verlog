@@ -5,7 +5,7 @@ from gym import spaces
 from verl.envs.environments.env_wrapper import EnvWrapper
 
 
-def make_env(env_name, task, config, render_mode=None):
+def make_env(env_name, task, config, render_mode=None, tokenizer=None):
     """Create an environment instance with the appropriate wrapper based on the environment name.
 
     Args:
@@ -54,10 +54,19 @@ def make_env(env_name, task, config, render_mode=None):
         num_agents = getattr(config.envs, "dummy_num_agents", 2)
         return DummyOpenAIMultiEnv(prompt=dummy_prompt, num_agents=num_agents)
     elif env_name == "async_ticker_admissions":
+        from omegaconf import OmegaConf
         from verl.envs.async_ticker_env import AsyncTickerAdmissionsEnv, AsyncTickerEnvWrapper
 
         env_config = getattr(config.envs, "env_config", config.envs)
-        return AsyncTickerEnvWrapper(AsyncTickerAdmissionsEnv(env_config))
+        env_config_dict = OmegaConf.to_container(env_config, resolve=True)
+        # Inject prompt_length so the env can enforce a token-based trim budget on
+        # the user observation, keeping the critical header (student table, vote tally)
+        # always visible.
+        try:
+            env_config_dict["prompt_length"] = config.actor_rollout_ref.rollout.prompt_length
+        except Exception:
+            pass
+        return AsyncTickerEnvWrapper(AsyncTickerAdmissionsEnv(env_config_dict, tokenizer=tokenizer))
     else:
         raise ValueError(f"Unknown environment: {env_name}")
     
