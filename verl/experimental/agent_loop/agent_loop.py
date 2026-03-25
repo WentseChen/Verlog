@@ -521,14 +521,27 @@ class AgentLoopWorker:
         )
         
         from verl.envs.env import get_balrog_env as make_env
-        
-        self.env = make_env(self.config)
-        self.env.reset()
-        
-        self.val_env = make_env(self.config)
-        self.val_env.reset()
 
-    async def generate_sequences(self, batch: DataProto, counter, env_idx: int) -> DataProto:
+        num_workers = config.actor_rollout_ref.rollout.agent.num_workers
+        total_envs = config.envs.num_envs
+        if total_envs % num_workers != 0:
+            raise ValueError(
+                f"envs.num_envs ({total_envs}) must be divisible by "
+                f"actor_rollout_ref.rollout.agent.num_workers ({num_workers})"
+            )
+        self.num_envs_per_worker = total_envs // num_workers
+
+        self.envs = []
+        self.val_envs = []
+        for _ in range(self.num_envs_per_worker):
+            env = make_env(self.config)
+            env.reset()
+            self.envs.append(env)
+            val_env = make_env(self.config)
+            val_env.reset()
+            self.val_envs.append(val_env)
+
+    async def generate_sequences(self, batch: DataProto, counter, worker_rank: int) -> DataProto:
         """Generate sequences from agent loop.
 
         Args:
@@ -580,10 +593,24 @@ class AgentLoopWorker:
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             is_val = batch.meta_info.get("validate", False)
-            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], counter, env_idx, is_val, **kwargs)))
+            global_env_idx = worker_rank * self.num_envs_per_worker + i
+            env = self.val_envs[i] if is_val else self.envs[i]
+            tasks.append(
+                asyncio.create_task(
+                    self._run_agent_loop(
+                        sampling_params,
+                        trajectory_info[i],
+                        counter,
+                        global_env_idx,
+                        env,
+                        is_val,
+                        **kwargs,
+                    )
+                )
+            )
         outputs = await asyncio.gather(*tasks)
-
-        output = self._postprocess(outputs[0])
+        flat_outputs = [item for sub in outputs for item in sub]
+        output = self._postprocess(flat_outputs)
         return output
 
     async def _run_agent_loop(
@@ -592,11 +619,12 @@ class AgentLoopWorker:
         trajectory: dict[str, Any],
         counter,
         env_idx: int,
+        env: Any,
         is_val: bool,
         *,
         agent_name: str,
         **kwargs,
-    ) -> _InternalAgentLoopOutput:
+    ) -> list[_InternalAgentLoopOutput]:
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
@@ -616,8 +644,13 @@ class AgentLoopWorker:
                 tokenizer=self.tokenizer,
                 processor=self.processor,
             )
-            env = self.val_env if is_val else self.env
-            outputs: AgentLoopOutput = await agent_loop.run(env, counter, env_idx, sampling_params, is_val, **kwargs)
+            raw_outputs = await agent_loop.run(
+                env, counter, env_idx, sampling_params, is_val, **kwargs
+            )
+            if isinstance(raw_outputs, AgentLoopOutput):
+                outputs: list[AgentLoopOutput] = [raw_outputs]
+            else:
+                outputs = raw_outputs
 
             # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
 
@@ -990,16 +1023,17 @@ class AgentLoopManager:
             self.wake_up()
         
         num_envs = prompts.meta_info["num_envs"]
-        assert num_envs == len(self.agent_loop_workers), (
-            f"num_envs {num_envs} must be equal to the number of agent loop workers {len(self.agent_loop_workers)}"
+        num_workers = len(self.agent_loop_workers)
+        assert num_envs % num_workers == 0, (
+            f"num_envs {num_envs} must be divisible by the number of agent loop workers {num_workers}"
         )
         prompts = prompts.slice(end=num_envs)
-            
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
+
+        chunkes = prompts.chunk(num_workers)
         outputs = ray.get(
             [
-                worker.generate_sequences.remote(chunk, self.counter, env_idx)
-                for env_idx, (worker, chunk) in enumerate(zip(self.agent_loop_workers, chunkes, strict=True))
+                worker.generate_sequences.remote(chunk, self.counter, worker_rank)
+                for worker_rank, (worker, chunk) in enumerate(zip(self.agent_loop_workers, chunkes, strict=True))
             ]
         )
         output = DataProto.concat(outputs)
