@@ -418,6 +418,46 @@ class RewardManagerWorker:
         return self.reward_manager(data, return_dict)
 
 
+class AgentSystemEnvAdapter:
+    """Adapts EnvironmentManagerBase (batched) to single-env BalrogEnv-style interface.
+
+    tool_agent_loop.py expects:
+      reset()           -> (messages, info)
+      get_last_obs()    -> (messages, info)
+      step(action: str) -> (messages, reward, terminated, truncated, info)
+    where messages = [{"role": "user", "content": <text>}]
+    and   info     = {"metrics": <env_info_dict>}
+    """
+
+    def __init__(self, env_manager):
+        self._env = env_manager
+        self._last_messages = None
+        self._last_info = None
+
+    def _obs_to_messages(self, obs):
+        text = obs.get("text") or [""]
+        return [{"role": "user", "content": text[0]}]
+
+    def reset(self, kwargs=None):
+        obs, infos = self._env.reset(kwargs)
+        self._last_messages = self._obs_to_messages(obs)
+        self._last_info = {"metrics": infos[0] if infos else {}}
+        return self._last_messages, self._last_info
+
+    def get_last_obs(self):
+        if self._last_messages is None:
+            return self.reset()
+        return self._last_messages, self._last_info
+
+    def step(self, action: str):
+        obs, rewards, dones, infos = self._env.step([action])
+        self._last_messages = self._obs_to_messages(obs)
+        reward = float(rewards[0])
+        done = bool(dones[0])
+        self._last_info = {"metrics": infos[0] if infos else {}}
+        return self._last_messages, reward, done, False, self._last_info
+
+
 @ray.remote
 class AgentLoopWorker:
     """Agent loop worker takes a batch of messages and run each message in an agent loop."""
@@ -466,12 +506,20 @@ class AgentLoopWorker:
             trace_config.get("token2text", False),
         )
         
-        from verl.envs.env import get_balrog_env as make_env
-        
-        self.env = make_env(self.config)
+        from verl.agent_system.environments import make_envs
+
+        # Each AgentLoopWorker owns exactly 1 env instance; override batch sizes accordingly
+        worker_config = OmegaConf.merge(
+            self.config,
+            OmegaConf.create({
+                "data": {"train_batch_size": 1, "val_batch_size": 1},
+                "env": {"rollout": {"n": 1}},
+            }),
+        )
+        _train_env, _val_env = make_envs(worker_config)
+        self.env = AgentSystemEnvAdapter(_train_env)
         self.env.reset()
-        
-        self.val_env = make_env(self.config)
+        self.val_env = AgentSystemEnvAdapter(_val_env)
         self.val_env.reset()
 
     async def generate_sequences(self, batch: DataProto, counter, env_idx: int) -> DataProto:
@@ -972,9 +1020,12 @@ class AgentLoopManager:
                         env_infos[key] = []
                     env_infos[key].append(value)
         
-        for key in env_infos.keys():
+        for key in list(env_infos.keys()):
             if len(env_infos[key]) > 0:
-                env_infos[key] = np.mean(env_infos[key])
+                try:
+                    env_infos[key] = np.mean(env_infos[key])
+                except (TypeError, ValueError):
+                    del env_infos[key]
             else:
                 env_infos[key] = 0.0
                 

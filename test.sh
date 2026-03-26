@@ -1,19 +1,8 @@
-#!/bin/bash
-#SBATCH --job-name=loop
-#SBATCH --output=logs/slurm-%j.out
-#SBATCH --error=logs/slurm-%j.err
-#SBATCH --mem=200G
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=4
-#SBATCH --partition=gpuA40x4
-#SBATCH --account=bfoz-delta-gpu
-#SBATCH --time=47:59:59
-#SBATCH --gpus-per-node=4
-
-source /u/wchen11/anaconda3/bin/activate 
+source /u/wchen11/anaconda3/bin/activate
 conda activate verlog
 cd /u/wchen11/Verlog
+
+set -a; source .env; set +a
 
 ulimit -n 65535
 
@@ -62,13 +51,17 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.agent.num_workers=${NUM_ENVS} \
     actor_rollout_ref.rollout.n=1 \
+    env.env_name=alfworld/AlfredTWEnv \
+    env.alfworld.eval_dataset=eval_in_distribution \
+    env.max_steps=50 \
+    env.history_length=1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=True \
     trainer.balance_batch=False \
-    trainer.critic_warmup=10 \
-    trainer.critic_warmup_batch_repeat_times=40 \
-    trainer.critic_warmup_batch_divide_ratio=4 \
+    trainer.critic_warmup=0 \
+    trainer.critic_warmup_batch_repeat_times=1 \
+    trainer.critic_warmup_batch_divide_ratio=1 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='zero' \
     trainer.experiment_name='ppo_epoch' \
@@ -77,10 +70,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=30 \
     trainer.total_epochs=60 \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     envs.num_envs=${NUM_ENVS} \
-    envs.env_name=babyai \
-    envs.task=BabyAI-MixedTrainLocal-v0/goto \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \
@@ -98,6 +89,8 @@ python3 -m verl.trainer.main_ppo \
     critic.forward_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
     data.train_files=$HOME/data/gsm8k/test.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
+    data.dataloader_num_workers=0 \
+    env.resources_per_worker.num_cpus=0 \
     $@
 
 

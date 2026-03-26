@@ -388,13 +388,45 @@ envs:
     seed: null                  
     max_episode_steps: 2000 
      
-  minihack_kwargs: 
+  minihack_kwargs:
     character: "@"
     max_episode_steps: 100
-    penalty_step: -0.01         
-    penalty_time: 0.0           
-    penalty_mode: constant      
+    penalty_step: -0.01
+    penalty_time: 0.0
+    penalty_mode: constant
     savedir: null
     save_ttyrec_every: 0
-    autopickup: False           
+    autopickup: False
     skip_more: True
+
+# agent_system environment config (used by verl.agent_system.environments.make_envs)
+env:
+
+  # Environment name, e.g. "search/SearchEnv", "gym_cards/Point24", "alfworld/AlfredTWEnv"
+  env_name: search/SearchEnv
+
+  seed: 42
+
+  # Max number of agent steps per episode
+  max_steps: 10
+
+  # Number of past steps to include in the context prompt
+  history_length: 3
+
+  rollout:
+    # Group size for group-based RL (GiGPO). 1 = no grouping.
+    n: 1
+
+  # Search environment config (used when env_name contains "search")
+  search:
+    retriever:
+      topk: 3
+      url: null
+
+  # Ray resources per worker (e.g. {"num_cpus": 1, "num_gpus": 0})
+  resources_per_worker:
+    num_cpus: 1
+
+  # AlfWorld environment config (used when env_name contains "alfworld")
+  alfworld:
+    eval_dataset: eval_in_distribution
