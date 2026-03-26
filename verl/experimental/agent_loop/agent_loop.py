@@ -508,21 +508,36 @@ class AgentLoopWorker:
         
         from verl.agent_system.environments import make_envs
 
-        # Each AgentLoopWorker owns exactly 1 env instance; override batch sizes accordingly
-        worker_config = OmegaConf.merge(
-            self.config,
-            OmegaConf.create({
-                "data": {"train_batch_size": 1, "val_batch_size": 1},
-                "env": {"rollout": {"n": 1}},
-            }),
+        # Each worker owns `envs_per_worker` independent env stacks (batch size 1 each) so async
+        # agent loops can step without vectorized lockstep. Total envs = envs.num_envs ==
+        # agent.num_workers * envs_per_worker.
+        num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
+        total_envs = self.config.envs.num_envs
+        assert total_envs % num_workers == 0, (
+            f"envs.num_envs ({total_envs}) must be divisible by rollout.agent.num_workers ({num_workers})"
         )
-        _train_env, _val_env = make_envs(worker_config)
-        self.env = AgentSystemEnvAdapter(_train_env)
-        self.env.reset()
-        self.val_env = AgentSystemEnvAdapter(_val_env)
-        self.val_env.reset()
+        envs_per_worker = total_envs // num_workers
+        _seed = self.config.env.get("seed", 0)
+        base_seed = int(_seed) if _seed is not None else 0
+        self.train_env_adapters: list[AgentSystemEnvAdapter] = []
+        self.val_env_adapters: list[AgentSystemEnvAdapter] = []
+        for slot in range(envs_per_worker):
+            worker_config = OmegaConf.merge(
+                self.config,
+                OmegaConf.create({
+                    "data": {"train_batch_size": 1, "val_batch_size": 1},
+                    "env": {"rollout": {"n": 1}, "seed": base_seed + slot},
+                }),
+            )
+            _train_env, _val_env = make_envs(worker_config)
+            train_adapter = AgentSystemEnvAdapter(_train_env)
+            train_adapter.reset()
+            val_adapter = AgentSystemEnvAdapter(_val_env)
+            val_adapter.reset()
+            self.train_env_adapters.append(train_adapter)
+            self.val_env_adapters.append(val_adapter)
 
-    async def generate_sequences(self, batch: DataProto, counter, env_idx: int) -> DataProto:
+    async def generate_sequences(self, batch: DataProto, counter, base_env_idx: int) -> DataProto:
         """Generate sequences from agent loop.
 
         Args:
@@ -574,11 +589,28 @@ class AgentLoopWorker:
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             is_val = batch.meta_info.get("validate", False)
-            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], counter, env_idx, is_val, **kwargs)))
+            tasks.append(
+                asyncio.create_task(
+                    self._run_agent_loop(
+                        sampling_params,
+                        trajectory_info[i],
+                        counter,
+                        base_env_idx + i,
+                        env_slot=i,
+                        is_val=is_val,
+                        **kwargs,
+                    )
+                )
+            )
         outputs = await asyncio.gather(*tasks)
 
-        output = self._postprocess(outputs[0])
-        return output
+        flat: list[_InternalAgentLoopOutput] = []
+        for task_result in outputs:
+            if isinstance(task_result, list):
+                flat.extend(task_result)
+            else:
+                flat.append(task_result)
+        return self._postprocess(flat)
 
     async def _run_agent_loop(
         self,
@@ -586,11 +618,12 @@ class AgentLoopWorker:
         trajectory: dict[str, Any],
         counter,
         env_idx: int,
-        is_val: bool,
         *,
+        env_slot: int,
+        is_val: bool,
         agent_name: str,
         **kwargs,
-    ) -> _InternalAgentLoopOutput:
+    ) -> list[_InternalAgentLoopOutput]:
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
@@ -610,8 +643,14 @@ class AgentLoopWorker:
                 tokenizer=self.tokenizer,
                 processor=self.processor,
             )
-            env = self.val_env if is_val else self.env
-            outputs: AgentLoopOutput = await agent_loop.run(env, counter, env_idx, sampling_params, is_val, **kwargs)
+            env_adapters = self.val_env_adapters if is_val else self.train_env_adapters
+            assert 0 <= env_slot < len(env_adapters), (
+                f"env_slot {env_slot} out of range for this worker ({len(env_adapters)} envs)"
+            )
+            env = env_adapters[env_slot]
+            outputs: list[AgentLoopOutput] = await agent_loop.run(
+                env, counter, env_idx, sampling_params, is_val, **kwargs
+            )
 
             # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
 
@@ -983,16 +1022,18 @@ class AgentLoopManager:
             self.wake_up()
         
         num_envs = prompts.meta_info["num_envs"]
-        assert num_envs == len(self.agent_loop_workers), (
-            f"num_envs {num_envs} must be equal to the number of agent loop workers {len(self.agent_loop_workers)}"
+        num_workers = len(self.agent_loop_workers)
+        assert num_envs % num_workers == 0, (
+            f"num_envs {num_envs} must be divisible by the number of agent loop workers {num_workers}"
         )
+        envs_per_worker = num_envs // num_workers
         prompts = prompts.slice(end=num_envs)
-            
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
+
+        chunkes = prompts.chunk(num_workers)
         outputs = ray.get(
             [
-                worker.generate_sequences.remote(chunk, self.counter, env_idx)
-                for env_idx, (worker, chunk) in enumerate(zip(self.agent_loop_workers, chunkes, strict=True))
+                worker.generate_sequences.remote(chunk, self.counter, worker_idx * envs_per_worker)
+                for worker_idx, (worker, chunk) in enumerate(zip(self.agent_loop_workers, chunkes, strict=True))
             ]
         )
         output = DataProto.concat(outputs)
