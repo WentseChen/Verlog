@@ -4,6 +4,7 @@ import numpy as np
 from typing import Any, Dict, List, Optional, Tuple
 import re
 from copy import deepcopy
+from collections import Counter
 
 from verl.envs.history_manager import HistoryManager
 from verl.envs.time_manager import TimeManager
@@ -135,7 +136,7 @@ class AsyncTickerAdmissionsEnv(gym.Env):
             f"Required format: <THINK>your private reasoning</THINK> followed by one of:\n"
             f"1. <GROUP>your message</GROUP> - Send a message visible to all (uses token budget)\n"
             f"2. <WAIT> - Skip your turn\n"
-            f"3. <VOTE>student_index</VOTE> - Cast your FINAL vote for a student\n\n"
+            f"3. <VOTE>student_index</VOTE> - Cast your FINAL vote for a student (e.g. <VOTE>2</VOTE>)\n\n"
             f"ALL VALID ACTIONS: (no two group, wait, or vote are allowed in one turn)\n"
             f"1. <THINK>your reasoning</THINK><GROUP>your message</GROUP>\n"
             f"2. <THINK>your reasoning</THINK><WAIT>\n"
@@ -157,11 +158,14 @@ class AsyncTickerAdmissionsEnv(gym.Env):
             f"- Keep <GROUP> messages concise - aim for 2 sentences or less.\n"
             f"- Keep <THINK> reasoning concise - aim for 3 sentences or less to organize your thoughts efficiently. You don't want to take up too much space, or your message history will get truncated in the future.\n"
             f"VOTING RULES:\n"
+            f"- To cast a vote you MUST use the tag <VOTE>N</VOTE> where N is the student index (0-{self.students_per_batch - 1}).\n"
+            f"  Example: <THINK>Student 2 is best.</THINK><VOTE>2</VOTE>\n"
+            f"- NEVER write your vote inside a <GROUP> message. <GROUP>Vote for Student 2</GROUP> does NOT count as a vote.\n"
             f"- <VOTE> is a FINAL, IRREVOCABLE commitment. Once you vote, you cannot act again.\n"
             f"- ALWAYS check the CURRENT VOTE TALLY shown in your observation before acting.\n"
             f"- If you see that 2 professors already agree on a student, vote for that student immediately to reach consensus — even if it is not your top choice. Getting something is better than everyone getting 0.\n"
-            f"- If you have made up your mind, VOTE immediately. Do not send more GROUP messages about it.\n"
-            f"- Discussing your intention to vote in a GROUP message wastes tokens. Just vote.\n\n"
+            f"- If you have made up your mind, VOTE immediately using <VOTE>N</VOTE>. Do not send GROUP messages about it.\n"
+            f"- Discussing your intention to vote in a GROUP message wastes tokens. Use <VOTE>N</VOTE> directly.\n\n"
             f"STRATEGIC CONSIDERATIONS:\n"
             f"- Your utility scores are shown in the student table. Use them to guide your preferences.\n"
             f"- DO NOT reveal your exact utility numbers to others in <GROUP> messages.\n"
@@ -465,12 +469,13 @@ class AsyncTickerAdmissionsEnv(gym.Env):
             self.episode_state["consensus_choice"] = consensus_choice
             done = True
         else:
+            all_voted = self.time_manager.all_voted()
             budget_exceeded = self.episode_state["tokens_used"] >= self.token_budget
             steps_exceeded = (
                 self.max_steps is not None
                 and self.episode_state["step_count"] >= self.max_steps
             )
-            done = budget_exceeded or steps_exceeded
+            done = all_voted or budget_exceeded or steps_exceeded
 
         # Refresh episode_state snapshots from managers
         self.episode_state["agent_tickers"] = self.time_manager.get_public_tickers()
@@ -587,23 +592,7 @@ class AsyncTickerAdmissionsEnv(gym.Env):
                 "action_text": "",
             }
 
-        # Reject responses that contain multiple action tags (e.g. <GROUP>+<WAIT>)
-        action_tag_patterns = [
-            r"<VOTE>\s*\d+\s*</VOTE>",
-            r"<WAIT\s*/>|<WAIT\s*>(?:</WAIT\s*>)?",
-            r"<GROUP>.*?</GROUP>",
-        ]
-        found_tag_count = sum(
-            1 for p in action_tag_patterns if re.search(p, remainder, re.DOTALL)
-        )
-        if found_tag_count > 1:
-            return {
-                "type": "discuss",
-                "think_text": think_text,
-                "action_text": remainder,
-            }
-
-        # Parse the action from the remainder
+        # Parse the action from the remainder (priority: VOTE > WAIT > GROUP)
         vote_match = re.search(r"<VOTE>\s*(\d+)\s*</VOTE>", remainder)
         if vote_match:
             return {
@@ -623,6 +612,27 @@ class AsyncTickerAdmissionsEnv(gym.Env):
 
         communication_match = re.search(r"<GROUP>(.*?)</GROUP>", remainder, re.DOTALL)
         if communication_match:
+            group_content = communication_match.group(1).strip()
+            # Detect GROUP messages that are actually vote declarations, e.g.:
+            #   "Vote for Student 2", "Voting for Student 3",
+            #   "Cast my vote for Student 4", "Will vote for Student 0",
+            #   "I will cast my vote for Student 2"
+            # Anchored at start to avoid matching "I will persuade ... vote for".
+            vote_in_group_match = re.match(
+                r"(?:i\s+will\s+|i(?:'ll)?\s+|will\s+)?"
+                r"(?:cast\s+(?:my\s+|a\s+|our\s+)?)?"
+                r"(?:vote|voting)\s+for\s+student\s*(\d+)",
+                group_content,
+                re.IGNORECASE,
+            )
+            if vote_in_group_match:
+                student_idx = vote_in_group_match.group(1)
+                return {
+                    "type": "vote",
+                    "choice": int(student_idx),
+                    "think_text": think_text,
+                    "action_text": f"<VOTE>{student_idx}</VOTE>",
+                }
             return {
                 "type": "communication",
                 "think_text": think_text,
@@ -897,13 +907,32 @@ class AsyncTickerAdmissionsEnv(gym.Env):
                 student_idx = msg["choice"]
                 vote_distribution[student_idx] = vote_distribution.get(student_idx, 0) + 1
 
+        non_think_messages = [m for m in self.history_manager._all_messages if m["message_type"] != "think"]
+        total_turns = len(non_think_messages)
+
+        # Find the exact turn at which consensus was reached (the deciding vote)
+        consensus_turn = None
+        if self.episode_state["consensus_reached"]:
+            running_votes = {}
+            for i, msg in enumerate(non_think_messages):
+                if msg["message_type"] == "vote" and "choice" in msg:
+                    running_votes[msg["agent_id"]] = msg["choice"]
+                    valid = [idx for idx in running_votes.values() if 0 <= idx < len(self.student_batch)]
+                    for student_idx, count in Counter(valid).items():
+                        if count / len(self.professor_ids) >= self.vote_threshold:
+                            consensus_turn = i + 1  # 1-indexed
+                            break
+                if consensus_turn is not None:
+                    break
+
         metrics["negotiation_dynamics"] = {
-            "total_turns": len([m for m in self.history_manager._all_messages if m["message_type"] != "think"]),
+            "total_turns": total_turns,
             "turns_to_first_vote": first_vote_turn if first_vote_turn is not None else None,
-            "turns_to_consensus": len([m for m in self.history_manager._all_messages if m["message_type"] != "think"]),
+            "turns_to_consensus": consensus_turn,
             "voting_duration": (last_vote_turn - first_vote_turn) if (first_vote_turn is not None and last_vote_turn is not None) else 0,
             "votes_cast": len(self.episode_state["votes"]),
             "vote_distribution": vote_distribution,
+            "consensus_reached": int(self.episode_state["consensus_reached"]),
         }
 
         # 5. FAIRNESS METRICS
@@ -1035,7 +1064,8 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         # 4. NEGOTIATION DYNAMICS
         flattened["negotiation/total_turns"] = metrics["negotiation_dynamics"]["total_turns"]
         flattened["negotiation/turns_to_first_vote"] = metrics["negotiation_dynamics"]["turns_to_first_vote"] if metrics["negotiation_dynamics"]["turns_to_first_vote"] is not None else -1
-        flattened["negotiation/turns_to_consensus"] = metrics["negotiation_dynamics"]["turns_to_consensus"]
+        flattened["negotiation/turns_to_consensus"] = metrics["negotiation_dynamics"]["turns_to_consensus"] if metrics["negotiation_dynamics"]["turns_to_consensus"] is not None else -1
+        flattened["negotiation/consensus_reached"] = metrics["negotiation_dynamics"]["consensus_reached"]
         flattened["negotiation/voting_duration"] = metrics["negotiation_dynamics"]["voting_duration"]
         flattened["negotiation/votes_cast"] = metrics["negotiation_dynamics"]["votes_cast"]
 
@@ -1076,12 +1106,14 @@ class AsyncTickerEnvWrapper(gym.Wrapper):
         super().__init__(env)
         self._last_observations: Optional[List[Dict[str, str]]] = None
         self._last_infos: Optional[Dict[str, Dict]] = None
+        self._episode_done: bool = False
 
     def reset(self, agent_id: str | None = None) -> Tuple[List[Dict[str, str]], Dict[str, Dict]]:
         observations, infos = self.env.reset()
         info = infos[self.env.episode_state["active_agent"]]
         self._last_observations = observations
         self._last_infos = info
+        self._episode_done = False
         return observations, info
 
     def step(
@@ -1093,6 +1125,11 @@ class AsyncTickerEnvWrapper(gym.Wrapper):
         Dict[str, bool],
         Dict[str, Dict],
     ]:
+        if self._episode_done:
+            observations, info = self.reset()
+            # Discard the stale action from the previous episode; return the
+            # fresh initial observation so the caller generates a new response.
+            return observations, 0.0, False, False, info
         acting_agent = self.env.episode_state["active_agent"]
         observations, rewards, terminations, truncations, infos = self.env.step(action)
         reward = rewards[acting_agent]
@@ -1101,12 +1138,15 @@ class AsyncTickerEnvWrapper(gym.Wrapper):
         info = infos[acting_agent]
         self._last_observations = observations
         self._last_infos = info
+        if terminated or truncated:
+            self._episode_done = True
         return observations, reward, terminated, truncated, info
 
     def get_last_obs(
         self, agent_id: str | None = None
     ) -> Tuple[Optional[List[Dict[str, str]]], Optional[Dict[str, Dict]]]:
-        """Return the last (observations, infos) from the most recent reset() or step()."""
-        if self._last_observations is None or self._last_infos is None:
+        """Return the last (observations, infos) from the most recent reset() or step().
+        Returns (None, None) if the episode has ended, so the caller triggers reset()."""
+        if self._last_observations is None or self._last_infos is None or self._episode_done:
             return None, None
         return self._last_observations, self._last_infos

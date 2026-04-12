@@ -25,6 +25,7 @@ class TimeManager:
         ]
         heapq.heapify(self._heap)
         self._voted_agents = set()
+        self._fallback_counter = 0
 
     # ------------------------------------------------------------------
     # Public snapshot accessors
@@ -56,6 +57,10 @@ class TimeManager:
     def record_vote(self, agent_id: str) -> None:
         """Mark an agent as having voted; they will no longer be selected."""
         self._voted_agents.add(agent_id)
+
+    def all_voted(self) -> bool:
+        """Return True if every agent has cast a vote."""
+        return self._voted_agents.issuperset(self.professor_ids)
 
     def set_wait(self, agent_id: str, wait_info: Dict[str, Any]) -> None:
         """
@@ -137,10 +142,13 @@ class TimeManager:
                 if agent_id not in self._voted_agents
             )
 
-        # If still no candidates (all have voted), return the first agent
-        # (shouldn't happen in practice, but keep behavior well-defined).
+        # If still no candidates (all have voted), rotate through professors
+        # to avoid always returning the same agent when the training loop
+        # continues past episode done.
         if not candidates:
-            return min(self.professor_ids)
+            idx = self._fallback_counter % len(self.professor_ids)
+            self._fallback_counter += 1
+            return self.professor_ids[idx]
 
         candidates.sort()
         return candidates[0][1]
