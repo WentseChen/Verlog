@@ -458,8 +458,8 @@ class AsyncTickerAdmissionsEnv(gym.Env):
                 extra_fields=None,
             )
 
-        # Update total tokens used — only action tokens count against budget
-        self.episode_state["tokens_used"] += action_tokens
+        # Update total tokens used — think + action both count against budget
+        self.episode_state["tokens_used"] += total_ticker_tokens
         self.episode_state["step_count"] += 1
 
         # Check for consensus
@@ -529,6 +529,10 @@ class AsyncTickerAdmissionsEnv(gym.Env):
 
         return observations, rewards, terminations, truncations, infos
 
+    def get_all_agent_observations(self) -> Dict[str, List[Dict[str, str]]]:
+        """Return current chat-message observations for every agent (for bootstrapping)."""
+        return {aid: self._build_chat_messages(aid) for aid in self.professor_ids}
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -593,8 +597,18 @@ class AsyncTickerAdmissionsEnv(gym.Env):
             }
 
         # Parse the action from the remainder (priority: VOTE > WAIT > GROUP)
+        _ACTION_TAG_RE = re.compile(r"<VOTE>|<WAIT[\s/]|<GROUP>")
+
+        def _has_extra_action_tag(text: str, consumed_span) -> bool:
+            """Return True if there is an action tag outside the consumed match span."""
+            before = text[:consumed_span[0]]
+            after = text[consumed_span[1]:]
+            return bool(_ACTION_TAG_RE.search(before) or _ACTION_TAG_RE.search(after))
+
         vote_match = re.search(r"<VOTE>\s*(\d+)\s*</VOTE>", remainder)
         if vote_match:
+            if _has_extra_action_tag(remainder, vote_match.span()):
+                return {"type": "raw", "think_text": think_text, "action_text": remainder}
             return {
                 "type": "vote",
                 "choice": int(vote_match.group(1)),
@@ -604,6 +618,8 @@ class AsyncTickerAdmissionsEnv(gym.Env):
 
         wait_match = re.search(r"<WAIT\s*/>|<WAIT\s*>(?:</WAIT\s*>)?", remainder, re.DOTALL)
         if wait_match:
+            if _has_extra_action_tag(remainder, wait_match.span()):
+                return {"type": "raw", "think_text": think_text, "action_text": remainder}
             return {
                 "type": "wait",
                 "think_text": think_text,
@@ -612,6 +628,8 @@ class AsyncTickerAdmissionsEnv(gym.Env):
 
         communication_match = re.search(r"<GROUP>(.*?)</GROUP>", remainder, re.DOTALL)
         if communication_match:
+            if _has_extra_action_tag(remainder, communication_match.span()):
+                return {"type": "raw", "think_text": think_text, "action_text": remainder}
             group_content = communication_match.group(1).strip()
             # Detect GROUP messages that are actually vote declarations, e.g.:
             #   "Vote for Student 2", "Voting for Student 3",
@@ -755,7 +773,7 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         metrics = {}
 
         # 1. SOCIAL WELFARE METRICS
-        # Calculate utilities for all students to find optimal
+        # Calculate penalty-free utilities for all students to find optimal
         all_utilities = []
         for student in self.student_batch:
             total_utility = sum(
@@ -769,7 +787,17 @@ class AsyncTickerAdmissionsEnv(gym.Env):
 
         optimal_total_utility = max(all_utilities)
         optimal_student = all_utilities.index(optimal_total_utility)
-        actual_total_utility = sum(agent_rewards.values())
+
+        # Compute actual utility without penalties for efficiency metric
+        consensus_choice = self.episode_state.get("consensus_choice")
+        if self.episode_state["consensus_reached"] and consensus_choice is not None and 0 <= consensus_choice < len(self.student_batch):
+            selected_profile = self.student_batch[consensus_choice]["profile_vector"]
+            actual_total_utility = sum(
+                self._calculate_utility_for_student(self.professor_interests[a], selected_profile)
+                for a in self.professor_ids
+            )
+        else:
+            actual_total_utility = 0.0
 
         metrics["social_welfare"] = {
             "actual_total_utility": actual_total_utility,
@@ -814,6 +842,7 @@ class AsyncTickerAdmissionsEnv(gym.Env):
             "total_budget": self.token_budget,
             "tokens_used": self.episode_state["tokens_used"],
             "budget_utilization": self.episode_state["tokens_used"] / self.token_budget if self.token_budget > 0 else 0.0,
+            "total_response_tokens": total_think + total_action,
             "token_breakdown": {
                 "think_tokens": total_think,
                 "action_tokens": total_action,
@@ -823,6 +852,9 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         }
 
         # 3. ACTION VALIDITY
+        # Valid turns: single valid action (comm/vote/wait) OR think-only (status message).
+        # Invalid turns: raw (malformed/multi-action), discuss (missing tags).
+        # Denominator = total steps taken (every turn counts).
         valid_count = 0
         invalid_turns = []
         type_counts = {
@@ -836,11 +868,10 @@ class AsyncTickerAdmissionsEnv(gym.Env):
 
         for msg in self.history_manager._all_messages:
             if msg["message_type"] == "think":
-                continue  # Don't count think-only as invalid, it's tracked separately
+                continue
 
             msg_type = msg["message_type"]
 
-            # Count by type
             if msg_type == "communication":
                 type_counts["communication"] += 1
                 valid_count += 1
@@ -849,6 +880,10 @@ class AsyncTickerAdmissionsEnv(gym.Env):
                 valid_count += 1
             elif msg_type == "wait":
                 type_counts["wait"] += 1
+                valid_count += 1
+            elif msg_type == "status":
+                # status = think-only turn; agent chose not to act publicly (valid)
+                type_counts["think_only"] += 1
                 valid_count += 1
             elif msg_type == "raw":
                 type_counts["raw"] += 1
@@ -867,25 +902,14 @@ class AsyncTickerAdmissionsEnv(gym.Env):
                     "reason": "missing_action_tags"
                 })
 
-        # Count think-only messages
-        for msg in self.history_manager._all_messages:
-            if msg["message_type"] == "think":
-                # Check if this agent has a corresponding action in same turn
-                same_turn_actions = [
-                    m for m in self.history_manager._all_messages
-                    if m["agent_id"] == msg["agent_id"] and m["ticker_time"] == msg["ticker_time"] and m["message_type"] != "think"
-                ]
-                if not same_turn_actions:
-                    type_counts["think_only"] += 1
-
-        total_actions = sum(type_counts.values())
+        total_steps = self.episode_state["step_count"]
         invalid_count = type_counts["raw"] + type_counts["discuss"]
 
         metrics["action_validity"] = {
-            "total_actions": total_actions,
+            "total_actions": total_steps,
             "valid_actions": valid_count,
             "invalid_actions": invalid_count,
-            "validity_rate": valid_count / total_actions if total_actions > 0 else 0.0,
+            "validity_rate": valid_count / total_steps if total_steps > 0 else 0.0,
             "by_type": type_counts,
             "invalid_turns": invalid_turns,
         }
@@ -935,22 +959,29 @@ class AsyncTickerAdmissionsEnv(gym.Env):
             "consensus_reached": int(self.episode_state["consensus_reached"]),
         }
 
-        # 5. FAIRNESS METRICS
-        reward_values = list(agent_rewards.values())
-        if reward_values:
-            rewards_array = np.array(reward_values)
+        # 5. FAIRNESS METRICS — use penalty-free utilities for Gini
+        _consensus_choice = self.episode_state.get("consensus_choice")
+        if self.episode_state["consensus_reached"] and _consensus_choice is not None and 0 <= _consensus_choice < len(self.student_batch):
+            _selected_profile = self.student_batch[_consensus_choice]["profile_vector"]
+            utility_values = [
+                self._calculate_utility_for_student(self.professor_interests[a], _selected_profile)
+                for a in self.professor_ids
+            ]
+        else:
+            utility_values = [0.0] * len(self.professor_ids)
 
-            # Gini coefficient calculation
-            sorted_rewards = np.sort(rewards_array)
-            n = len(sorted_rewards)
-            cumsum = np.cumsum(sorted_rewards)
-            gini = (2 * np.sum((np.arange(1, n + 1) * sorted_rewards))) / (n * np.sum(sorted_rewards)) - (n + 1) / n if np.sum(sorted_rewards) > 0 else 0.0
+        if utility_values:
+            util_array = np.array(utility_values)
+            sorted_util = np.sort(util_array)
+            n = len(sorted_util)
+            total_util = np.sum(sorted_util)
+            gini = (2 * np.sum(np.arange(1, n + 1) * sorted_util)) / (n * total_util) - (n + 1) / n if total_util > 0 else 0.0
 
             metrics["fairness"] = {
-                "min_reward": float(np.min(rewards_array)),
-                "max_reward": float(np.max(rewards_array)),
-                "reward_range": float(np.max(rewards_array) - np.min(rewards_array)),
-                "reward_std": float(np.std(rewards_array)),
+                "min_reward": float(np.min(util_array)),
+                "max_reward": float(np.max(util_array)),
+                "reward_range": float(np.max(util_array) - np.min(util_array)),
+                "reward_std": float(np.std(util_array)),
                 "gini_coefficient": float(gini),
             }
         else:
@@ -1017,9 +1048,36 @@ class AsyncTickerAdmissionsEnv(gym.Env):
 
         metrics["communication"] = {
             "total_messages": message_count,
+            "total_tokens": total_message_tokens,
             "messages_per_agent": {agent_id: group_messages_by_agent.get(agent_id, 0) for agent_id in self.professor_ids},
             "silent_agents": silent_agents,
             "avg_message_length": total_message_tokens / message_count if message_count > 0 else 0.0,
+        }
+
+        # 8. CORE METRICS (for W&B logging)
+        total_turns = metrics["negotiation_dynamics"]["total_turns"]
+        comm_turns = type_counts["communication"]
+        think_turns = type_counts["think_only"]
+        reward_values_list = list(agent_rewards.values())
+
+        # Did the first agent to move vote on their first turn?
+        first_agent_voted_first_turn = 0
+        if non_think_messages:
+            first_msg = non_think_messages[0]
+            if first_msg["message_type"] == "vote":
+                first_agent_voted_first_turn = 1
+
+        metrics["core_metrics"] = {
+            "efficiency": metrics["social_welfare"]["efficiency"],
+            "gini_coefficient": metrics["fairness"]["gini_coefficient"],
+            "communication_turn_rate": comm_turns / total_turns if total_turns > 0 else 0.0,
+            "wait_turn_rate": type_counts["wait"] / total_turns if total_turns > 0 else 0.0,
+            "total_response_tokens": metrics["token_accounting"]["total_response_tokens"],
+            "total_communication_tokens": metrics["communication"]["total_tokens"],
+            "mean_reward": float(np.mean(reward_values_list)) if reward_values_list else 0.0,
+            "valid_action_rate": metrics["action_validity"]["validity_rate"],
+            "consensus_reached": metrics["negotiation_dynamics"]["consensus_reached"],
+            "first_agent_vote_first_turn": first_agent_voted_first_turn,
         }
 
         return metrics
@@ -1092,6 +1150,11 @@ class AsyncTickerAdmissionsEnv(gym.Env):
         # Per-agent message counts
         for agent_id, count in metrics["communication"]["messages_per_agent"].items():
             flattened[f"communication/{agent_id}/messages"] = count
+        flattened["communication/total_tokens"] = metrics["communication"]["total_tokens"]
+
+        # 8. CORE METRICS
+        for key, value in metrics["core_metrics"].items():
+            flattened[f"core/{key}"] = value
 
         return flattened
 
