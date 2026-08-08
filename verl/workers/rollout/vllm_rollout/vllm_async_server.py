@@ -139,7 +139,16 @@ class vLLMHttpServer:
 
         self.config: RolloutConfig | RewardModelConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
-        self.config.max_model_len = self.config.prompt_length + self.config.response_length
+        # Honour an explicit rollout.max_model_len; only derive it when unset.
+        # This used to overwrite unconditionally, so the documented `max_model_len:
+        # null` knob was silently ignored on the async path (the SPMD path does it
+        # correctly: `int(config.max_model_len or prompt+response)`).
+        # It matters for throughput: vLLM sizes its concurrency ceiling as
+        # KV_tokens / max_model_len, so the derived 3328 (=2304+1024) capped us at
+        # "Maximum concurrency for 3,328 tokens per request: 22.92x" even though the
+        # observed mean sequence is ~580 tokens.
+        if self.config.max_model_len is None:
+            self.config.max_model_len = self.config.prompt_length + self.config.response_length
         self.rollout_mode = rollout_mode
         self.workers = workers
 
@@ -346,7 +355,17 @@ class vLLMHttpServer:
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
-        max_tokens = self.config.max_model_len - len(prompt_ids)
+        # Cap at response_length, not just at whatever is left of max_model_len.
+        # max_model_len is prompt_length + response_length (see init), so the old
+        # expression allowed a short prompt to generate nearly the whole window --
+        # e.g. 3328 - 400 = 2928 tokens when response_length is 1024. Callers then
+        # truncate with `output.token_ids[:response_length]`, so every token past
+        # response_length was decoded and immediately discarded: wasted GPU work,
+        # and ~3x the KV footprint per request, which starves rollout concurrency.
+        max_tokens = min(
+            self.config.max_model_len - len(prompt_ids),
+            self.config.response_length,
+        )
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)

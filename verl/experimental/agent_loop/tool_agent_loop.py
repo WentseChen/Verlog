@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import copy
+import time as _time
 import json
 import logging
 import os
@@ -159,26 +160,33 @@ class ToolAgentLoop(AgentLoopBase):
         last_info = None
         
         while True:
-            # Pop data point from buffer
-            data_point = await data_buffer.pop.remote()
+            # Per-episode timing breakdown. episode_wall - generate_sequences is the
+            # time an episode spent NOT waiting on the LLM (measured: ~1.6%).
+            metrics = {}
+            _ep_t0 = _time.perf_counter()
+            # One data point per RPC; see the note in generate_sequences for why
+            # chunked refills are not used.
+            with simple_timer("buffer_pop", metrics):
+                data_point = await data_buffer.pop.remote()
             if data_point is None:
                 break
             # Reset environment with data point as sample
-            messages, info = env.reset(sample=data_point)
-            
-            metrics = {}
+            with simple_timer("env_reset", metrics):
+                messages, info = env.reset(sample=data_point)
+
             request_id = uuid4().hex
-            
-            prompt_ids = await self.loop.run_in_executor(
-                None,
-                lambda: self.tokenizer.apply_chat_template(
-                    messages,
-                    tools=self.tool_schemas,
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    **self.apply_chat_template_kwargs,
-                ),
-            )
+
+            with simple_timer("tokenize", metrics):
+                prompt_ids = await self.loop.run_in_executor(
+                    None,
+                    lambda: self.tokenizer.apply_chat_template(
+                        messages,
+                        tools=self.tool_schemas,
+                        add_generation_prompt=True,
+                        tokenize=True,
+                        **self.apply_chat_template_kwargs,
+                    ),
+                )
             
             num_turns = 0
             reward = 0.0
@@ -211,16 +219,18 @@ class ToolAgentLoop(AgentLoopBase):
                 else:
                     response_logprobs = None
                 
-                actions = await self.loop.run_in_executor(
-                    None,
-                    lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
-                )
-                
+                with simple_timer("detokenize", metrics):
+                    actions = await self.loop.run_in_executor(
+                        None,
+                        lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
+                    )
+
                 last_prompt_ids = copy.deepcopy(prompt_ids)
                 last_phase = info.get("phase")
                 last_info = copy.deepcopy(info)
-                
-                messages, reward, terminated, truncated, info = env.step(actions)
+
+                with simple_timer("env_step", metrics):
+                    messages, reward, terminated, truncated, info = env.step(actions)
                 done = np.logical_or(terminated, truncated)
                 
                 # Check if we're in the answering phase
@@ -255,20 +265,25 @@ class ToolAgentLoop(AgentLoopBase):
                             
                             # z_content is now the entire response from dreaming phase
                             # Tokenize z_content to match against response_ids
-                            z_content_tokens = self.tokenizer.encode(z_content, add_special_tokens=False)
-                            
-                            # z_index2: mark which tokens in response_ids correspond to z_content
-                            # Since z_content is the entire response, try to match it
-                            z_index2 = self._calculate_z_index2(response_ids, z_content_tokens)
-                            
-                            # If no match, try with space prefix (tokenization differences)
-                            if not any(z_index2):
-                                z_content_with_space = " " + z_content
-                                z_content_tokens = self.tokenizer.encode(z_content_with_space, add_special_tokens=False)
+                            # O(n*m) python substring searches between the two LLM calls;
+                            # measured at 0.7 ms, so not worth optimizing.
+                            with simple_timer("z_index_search", metrics):
+                                z_content_tokens = self.tokenizer.encode(z_content, add_special_tokens=False)
+
+                                # z_index2: mark which tokens in response_ids correspond to z_content
+                                # Since z_content is the entire response, try to match it
                                 z_index2 = self._calculate_z_index2(response_ids, z_content_tokens)
-                            
-                            # Calculate z_index: where z_content tokens appear in answering_prompt_ids
-                            z_index = self._calculate_z_index(answering_prompt_ids, z_content_tokens)
+
+                                # If no match, try with space prefix (tokenization differences)
+                                if not any(z_index2):
+                                    z_content_with_space = " " + z_content
+                                    z_content_tokens = self.tokenizer.encode(
+                                        z_content_with_space, add_special_tokens=False
+                                    )
+                                    z_index2 = self._calculate_z_index2(response_ids, z_content_tokens)
+
+                                # Calculate z_index: where z_content tokens appear in answering_prompt_ids
+                                z_index = self._calculate_z_index(answering_prompt_ids, z_content_tokens)
                             
                             len_z_index = z_index[1] - z_index[0] if z_index is not None else 0
                             len_z_index2 = sum(z_index2)
@@ -288,6 +303,10 @@ class ToolAgentLoop(AgentLoopBase):
                             info["metrics"]["z_index_length"] = len_z_index
                             info["metrics"]["z_index2_length"] = len_z_index2
                     
+                    # must be set BEFORE constructing AgentLoopOutput: pydantic
+                    # copies the metrics dict at construction, so a later
+                    # mutation of the same dict is silently discarded.
+                    metrics["episode_wall"] = _time.perf_counter() - _ep_t0
                     turn_data = AgentLoopOutput(
                         prompt_ids=prompt_ids,
                         response_ids=response_ids,

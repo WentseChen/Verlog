@@ -1187,15 +1187,47 @@ class RayPPOTrainer:
 
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
-                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                        entropys = old_log_prob.batch["entropys"]
-                        response_masks = batch.batch["response_mask"]
-                        loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                        entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-                        old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
-                        metrics.update(old_log_prob_metrics)
-                        old_log_prob.batch.pop("entropys")
-                        batch = batch.union(old_log_prob)
+                        # Fully on-policy shortcut. dp_actor uses log_prob.detach()
+                        # for the ratio when ppo_epochs == 1 and there is one
+                        # mini-batch, so the policy loss never reads old_log_probs;
+                        # the only consumer left is the in-reward KL penalty, and the
+                        # rollout policy IS the current policy here.
+                        # CAVEAT: vLLM's kernels differ from the training forward, so
+                        # this biases the KL term slightly. Watch
+                        # actor/reward_kl_penalty against its offline band.
+                        _on_policy = (
+                            self.config.actor_rollout_ref.actor.ppo_epochs == 1
+                            and self.config.data.train_batch_size
+                            == self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+                        )
+                        _reuse_rollout_logp = (
+                            self.config.actor_rollout_ref.rollout.get("calculate_log_probs", False)
+                            and _on_policy
+                            and "rollout_log_probs" in batch.batch.keys()
+                        )
+                        if _reuse_rollout_logp:
+                            batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"].to(
+                                batch.batch["responses"].device
+                            )
+                            # compute_log_prob normally injects meta_info["temperature"]
+                            # (fsdp_workers.py:989) and update_policy reads it directly
+                            # (dp_actor.py:428). Skipping that call drops it, so set it
+                            # here or the actor update dies with KeyError: 'temperature'.
+                            batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+                            # actor/entropy came from the skipped forward; omit it
+                            # rather than report a stale or wrong value.
+                        else:
+                            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                            entropys = old_log_prob.batch["entropys"]
+                            response_masks = batch.batch["response_mask"]
+                            loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                            entropy_agg = agg_loss(
+                                loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode
+                            )
+                            old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
+                            metrics.update(old_log_prob_metrics)
+                            old_log_prob.batch.pop("entropys")
+                            batch = batch.union(old_log_prob)
 
                         if "rollout_log_probs" in batch.batch.keys():
                             # TODO: we may want to add diff of probs too.
@@ -1285,36 +1317,49 @@ class RayPPOTrainer:
                                     # Replace z_content tokens in original ref_log_prob using batch operations
                                     original_ref_log_probs = ref_log_prob.batch["ref_log_prob"]  # (batch_size, response_len)
                                     
-                                    # Process each sample to replace z_content tokens
+                                    # Vectorized z_content splice: collect flat (row, col)
+                                    # index pairs, then do one scatter instead of 256 per-row
+                                    # tensor constructions + advanced-index writes. Semantics
+                                    # unchanged, including the length-mismatch skip.
+                                    ans_width = answering_ref_log_probs.shape[1]
+                                    src_rows, src_cols, dst_rows, dst_cols = [], [], [], []
+                                    mismatched = []
+
                                     for idx in range(batch_size):
                                         if not valid_mask[idx]:
                                             continue
-                                        
+
                                         z_start, z_end = z_index_list[idx]
-                                        z_idx2_mask = z_index2_list[idx]  # List[bool]
-                                        
-                                        # Get answering ref log probs for this sample
-                                        ans_msg_len = len(answering_messages_list[idx])
-                                        # Account for right-alignment padding
-                                        pad_offset = max_len - ans_msg_len
+                                        # Account for right-alignment (left) padding
+                                        pad_offset = max_len - len(answering_messages_list[idx])
                                         z_start_padded = z_start + pad_offset
-                                        z_end_padded = z_end + pad_offset
-                                        
-                                        # Extract z_content ref log probs from answering messages
-                                        z_content_ref_lps = answering_ref_log_probs[idx, z_start_padded:z_end_padded]
-                                        
-                                        # Convert z_index2 to tensor
-                                        z_idx2_tensor = torch.tensor(z_idx2_mask, dtype=torch.bool)
-                                        
-                                        # Verify dimensions match
-                                        num_z_tokens = z_idx2_tensor.sum().item()
-                                        if num_z_tokens != len(z_content_ref_lps):
-                                            print(f"Warning: z_index2 count ({num_z_tokens}) != z_content length ({len(z_content_ref_lps)}) for sample {idx}")
+                                        # slice is clipped by the tensor width, exactly as the
+                                        # original `answering_ref_log_probs[idx, a:b]` would be
+                                        z_end_padded = min(z_end + pad_offset, ans_width)
+                                        n_src = max(0, z_end_padded - z_start_padded)
+
+                                        dst_pos = np.flatnonzero(np.asarray(z_index2_list[idx], dtype=bool))
+                                        if dst_pos.size != n_src:
+                                            mismatched.append((idx, int(dst_pos.size), int(n_src)))
                                             continue
-                                        
-                                        # Replace tokens using boolean indexing
-                                        original_ref_log_probs[idx, z_idx2_tensor] = z_content_ref_lps
-                                    
+                                        if n_src == 0:
+                                            continue
+
+                                        src_rows.append(np.full(n_src, idx, dtype=np.int64))
+                                        src_cols.append(np.arange(z_start_padded, z_end_padded, dtype=np.int64))
+                                        dst_rows.append(np.full(dst_pos.size, idx, dtype=np.int64))
+                                        dst_cols.append(dst_pos.astype(np.int64))
+
+                                    if src_rows:
+                                        sr = torch.from_numpy(np.concatenate(src_rows))
+                                        sc = torch.from_numpy(np.concatenate(src_cols))
+                                        dr = torch.from_numpy(np.concatenate(dst_rows))
+                                        dc = torch.from_numpy(np.concatenate(dst_cols))
+                                        original_ref_log_probs[dr, dc] = answering_ref_log_probs[sr, sc]
+
+                                    for idx, n_mask, n_src in mismatched:
+                                        print(f"Warning: z_index2 count ({n_mask}) != z_content length ({n_src}) for sample {idx}")
+
                                     # Update the ref_log_prob batch
                                     ref_log_prob.batch["ref_log_prob"] = original_ref_log_probs
                             
@@ -1465,6 +1510,35 @@ class RayPPOTrainer:
                         "training/epoch": epoch,
                     }
                 )
+                # Compact step breakdown. The console metric dump truncates at ~4096
+                # chars and silently drops trailing keys (timing_s/step included), so
+                # this short line is the reliable place to read a step's wall-clock.
+                _tot = timing_raw.get("step", 0.0)
+                _phases = [
+                    ("gen", "gen"),
+                    ("upd_actor", "update_actor"),
+                    ("upd_critic", "update_critic"),
+                    ("ref", "ref"),
+                    ("old_logp", "old_log_prob"),
+                    ("values", "values"),
+                    ("adv", "adv"),
+                    ("reward", "reward"),
+                ]
+                _parts = []
+                for _label, _key in _phases:
+                    _v = timing_raw.get(_key)
+                    if _v is None:
+                        continue
+                    _pct = 100.0 * _v / _tot if _tot else 0.0
+                    _parts.append(f"{_label}={_v:.1f}s({_pct:.0f}%)")
+                _acct = sum(timing_raw.get(k, 0.0) for _, k in _phases)
+                print(
+                    f"[PROBE step {self.global_steps}] total={_tot:.1f}s | "
+                    + " ".join(_parts)
+                    + f" | unaccounted={_tot - _acct:.1f}s",
+                    flush=True,
+                )
+
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))

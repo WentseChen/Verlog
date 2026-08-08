@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import collections
 import heapq
 import logging
 import os
@@ -67,14 +68,18 @@ class DataBuffer:
                 except queue.Empty:
                     break
             
-            # Add all items from prompts
+            # prompts[i].batch is a TensorDict *view* over the whole batch, and
+            # pickling a view serializes the entire backing storage -- 20.4 MB per
+            # item instead of 0.081 MB. Materialize each row so only that row travels.
             for i in range(len(prompts)):
                 data_item = prompts[i]
+                if data_item.batch is not None:
+                    data_item.batch = data_item.batch.clone()
                 self._queue.put(data_item)
     
     async def pop(self):
         """Pop one data point from the buffer.
-        
+
         Returns:
             DataProtoItem or None: A data point from the buffer, or None if the buffer is empty.
         """
@@ -83,6 +88,9 @@ class DataBuffer:
                 return self._queue.get_nowait()
             except queue.Empty:
                 return None
+
+
+
 
 class AsyncLLMServerManager:
     """
@@ -152,6 +160,10 @@ class AsyncLLMServerManager:
 
 class AgentLoopMetrics(BaseModel):
     """Agent loop performance metrics."""
+
+    # extra="allow" so an AgentLoop can record extra timers without editing this
+    # schema; pydantic otherwise drops unknown keys silently.
+    model_config = ConfigDict(extra="allow")
 
     generate_sequences: float = 0.0
     tool_calls: float = 0.0
@@ -475,10 +487,22 @@ class AgentLoopWorker:
         
         from verl.envs.env import get_balrog_env as make_env
         from verl.envs.sp_env import get_mmlu_env as make_sp_env
-        
-        self.env = make_sp_env(self.config)
-        
-        self.val_env = make_sp_env(self.config)
+
+        # Host num_envs/num_workers envs per worker and drive them with asyncio, so
+        # rollout concurrency scales without one OS process per env. Each concurrent
+        # loop needs its OWN env instance: MMLUEnv holds per-episode state
+        # (phase / z_content / current_sample).
+        num_envs = self.config.envs.num_envs
+        num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
+        assert num_envs % num_workers == 0, (
+            f"envs.num_envs ({num_envs}) must be divisible by "
+            f"rollout.agent.num_workers ({num_workers})"
+        )
+        self.envs_per_worker = num_envs // num_workers
+
+        self.envs = [make_sp_env(self.config) for _ in range(self.envs_per_worker)]
+
+        self.val_envs = [make_sp_env(self.config) for _ in range(self.envs_per_worker)]
 
     async def generate_sequences(self, batch: DataProto, data_buffer, env_idx: int) -> DataProto:
         """Generate sequences from agent loop.
@@ -521,24 +545,71 @@ class AgentLoopWorker:
             default_agent_loop = config.agent.default_agent_loop
             batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(batch), dtype=object)
 
-        if "index" in batch.non_tensor_batch:
-            index = batch.non_tensor_batch["index"]
-        else:
-            index = np.arange(len(batch))
+        # `batch` is only a seed; episodes are drained from the shared data_buffer
+        # inside AgentLoop.run(). Concurrency is envs_per_worker, not len(batch).
+        index = np.arange(self.envs_per_worker)
 
         trajectory_info = await get_trajectory_info(
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
 
+        is_val = batch.meta_info.get("validate", False)
+        kwargs = {k: v[0] for k, v in batch.non_tensor_batch.items()}
+
+        # NOTE: pops stay one-at-a-time. Chunked refills gave no speedup once the
+        # view-clone fix landed, and they starve late-starting workers (a fast worker
+        # drains the buffer, leaving another with zero outputs -> empty torch.cat).
         tasks = []
-        for i in range(len(batch)):
-            kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
-            is_val = batch.meta_info.get("validate", False)
-            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], data_buffer, env_idx, is_val, **kwargs)))
+        for i in range(self.envs_per_worker):
+            # env_idx must stay globally unique across workers for env metrics
+            global_env_idx = env_idx * self.envs_per_worker + i
+            tasks.append(
+                asyncio.create_task(
+                    self._run_agent_loop(
+                        sampling_params,
+                        trajectory_info[i],
+                        data_buffer,
+                        global_env_idx,
+                        is_val,
+                        local_env_id=i,
+                        **kwargs,
+                    )
+                )
+            )
         outputs = await asyncio.gather(*tasks)
 
-        output = self._postprocess(outputs[0])
+        # each loop returns a List[AgentLoopOutput] (one entry per episode it drained)
+        flattened = [item for sub in outputs for item in sub]
+        output = self._postprocess(flattened)
         return output
+
+    @staticmethod
+    def _pad_fixed(ids, max_length: int, pad_value: int, left: bool):
+        """Pad one sequence to a fixed length.
+
+        Drop-in for tokenizer.pad(..., padding="max_length") on a single sequence,
+        without the BatchEncoding overhead. Returns (1, max_length) tensors:
+        (padded_ids, attention_mask).
+        """
+        seq = torch.as_tensor(ids, dtype=torch.long)
+        n = seq.numel()
+        if n > max_length:
+            # tokenizer.pad would have silently returned an over-long row here, which
+            # then blows up later in torch.cat / DataProto.concat with an opaque shape
+            # error. Fail loudly at the source instead.
+            raise ValueError(
+                f"sequence of length {n} exceeds max_length {max_length}; "
+                "raise data.max_prompt_length / data.max_response_length"
+            )
+        out = torch.full((max_length,), pad_value, dtype=torch.long)
+        mask = torch.zeros(max_length, dtype=torch.long)
+        if left:
+            out[max_length - n :] = seq
+            mask[max_length - n :] = 1
+        else:
+            out[:n] = seq
+            mask[:n] = 1
+        return out.unsqueeze(0), mask.unsqueeze(0)
 
     async def _run_agent_loop(
         self,
@@ -548,6 +619,7 @@ class AgentLoopWorker:
         env_idx: int,
         is_val: bool,
         *,
+        local_env_id: int = 0,
         agent_name: str,
         **kwargs,
     ) -> _InternalAgentLoopOutput:
@@ -570,7 +642,8 @@ class AgentLoopWorker:
                 tokenizer=self.tokenizer,
                 processor=self.processor,
             )
-            env = self.val_env if is_val else self.env
+            # one dedicated env instance per concurrent loop (see __init__)
+            env = self.val_envs[local_env_id] if is_val else self.envs[local_env_id]
             outputs: AgentLoopOutput = await agent_loop.run(env, data_buffer, env_idx, sampling_params, is_val, **kwargs)
 
             # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
@@ -594,40 +667,36 @@ class AgentLoopWorker:
 
             new_outputs = []
             for output in outputs:
-                
-                self.tokenizer.padding_side = "left"
-                prompt_output = self.tokenizer.pad(
-                    {"input_ids": output.prompt_ids},
-                    padding="max_length",
-                    max_length=self.config.actor_rollout_ref.rollout.prompt_length,
-                    return_tensors="pt",
-                    return_attention_mask=True,
-                )
-                if prompt_output["input_ids"].dim() == 1:
-                    prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
-                    prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
-                self.tokenizer.padding_side = "right"
-                response_output = self.tokenizer.pad(
-                    {"input_ids": output.response_ids},
-                    padding="max_length",
-                    max_length=self.config.actor_rollout_ref.rollout.response_length,
-                    return_tensors="pt",
-                    return_attention_mask=True,
+                # Fixed-length pads, so tokenizer.pad's generic machinery buys
+                # nothing: 440 ms -> 33 ms per 256-sample step (13x).
+                prompt_ids_t, prompt_mask_t = self._pad_fixed(
+                    output.prompt_ids,
+                    self.config.actor_rollout_ref.rollout.prompt_length,
+                    pad_value=self.tokenizer.pad_token_id,
+                    left=True,
                 )
-                if response_output["input_ids"].dim() == 1:
-                    response_output["input_ids"] = response_output["input_ids"].unsqueeze(0)
-                    response_output["attention_mask"] = response_output["attention_mask"].unsqueeze(0)
+                prompt_output = {"input_ids": prompt_ids_t, "attention_mask": prompt_mask_t}
 
-                response_mask_output = self.tokenizer.pad(
-                    {"input_ids": output.response_mask},
-                    padding="max_length",
-                    max_length=self.config.actor_rollout_ref.rollout.response_length,
-                    return_tensors="pt",
-                    return_attention_mask=False,
+                response_ids_t, response_mask_t = self._pad_fixed(
+                    output.response_ids,
+                    self.config.actor_rollout_ref.rollout.response_length,
+                    pad_value=self.tokenizer.pad_token_id,
+                    left=False,
                 )
-                if response_mask_output["input_ids"].dim() == 1:
-                    response_mask_output["input_ids"] = response_mask_output["input_ids"].unsqueeze(0)
+                response_output = {"input_ids": response_ids_t, "attention_mask": response_mask_t}
+
+                # NOTE: the original padded response_mask with pad_token_id, but the
+                # padded region is immediately zeroed by the multiply with
+                # response_output["attention_mask"] below, so padding with 0 here is
+                # equivalent and avoids a bogus token id sitting in a mask tensor.
+                resp_mask_ids_t, _ = self._pad_fixed(
+                    output.response_mask,
+                    self.config.actor_rollout_ref.rollout.response_length,
+                    pad_value=0,
+                    left=False,
+                )
+                response_mask_output = {"input_ids": resp_mask_ids_t}
 
                 response_logprobs = None
                 if output.response_logprobs is not None:
@@ -942,26 +1011,80 @@ class AgentLoopManager:
             self.wake_up()
         
         num_envs = prompts.meta_info["num_envs"]
-        assert num_envs == len(self.agent_loop_workers), (
-            f"num_envs {num_envs} must be equal to the number of agent loop workers {len(self.agent_loop_workers)}"
+        num_workers = len(self.agent_loop_workers)
+        # num_envs is the rollout CONCURRENCY; num_workers is the process count.
+        # Each worker hosts num_envs // num_workers envs and drives them with asyncio,
+        # so concurrency can be raised without spawning more Ray actors.
+        assert num_envs % num_workers == 0, (
+            f"num_envs {num_envs} must be divisible by the number of agent loop workers {num_workers}"
         )
-        prompts = prompts.slice(end=num_envs)
-            
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
+        # one seed row per worker; the real episodes are drained from data_buffer
+        prompts = prompts.slice(end=num_workers)
+
+        # PROBE: split timing_s/gen into wake_up / dispatch / concat / sleep so the
+        # orchestration cost is separated from the episodes themselves.
+        import time as _time
+
+        _probe = {}
+        _t0 = _time.perf_counter()
+        chunkes = prompts.chunk(num_workers)
         outputs = ray.get(
             [
                 worker.generate_sequences.remote(chunk, self.data_buffer, env_idx)
                 for env_idx, (worker, chunk) in enumerate(zip(self.agent_loop_workers, chunkes, strict=True))
             ]
         )
+        _probe["dispatch_and_run"] = _time.perf_counter() - _t0
+        _t0 = _time.perf_counter()
         output = DataProto.concat(outputs)
+        _probe["concat"] = _time.perf_counter() - _t0
+        _t0 = _time.perf_counter()
         if self.config.actor_rollout_ref.rollout.free_cache_engine:
             self.sleep()
+        _probe["sleep"] = _time.perf_counter() - _t0
 
         # calculate performance metrics
         metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
         timing = self._performance_metrics(metrics, output)
-        
+        for _k, _v in _probe.items():
+            timing[f"agent_loop/manager/{_k}"] = _v
+
+        # Compact, always-visible bottleneck line.
+        #
+        # The console metric dump is truncated at ~4096 chars, which silently drops
+        # whichever keys land at the end -- so the full timing dict is NOT a
+        # reliable place to read a breakdown from. Print a short standalone line
+        # that cannot be truncated. `wall` is what actually costs you; the per
+        # episode numbers are means and overlap across concurrent episodes, so they
+        # attribute cost but do not add up to wall time.
+        def _m(key, default=0.0):
+            return timing.get(f"agent_loop/{key}", default)
+
+        n_ep = len(
+            [m for chunk in metrics for m in chunk]
+        )
+        print(
+            "[PROBE rollout] wall: dispatch={:.1f}s concat={:.2f}s sleep={:.1f}s | "
+            "per-episode mean over {} eps: llm={:.2f}s pop={:.3f}s tok={:.4f}s "
+            "detok={:.4f}s env_reset={:.5f}s env_step={:.5f}s | llm_sum={:.0f}s "
+            "=> effective_in_flight={:.1f}".format(
+                _probe.get("dispatch_and_run", 0.0),
+                _probe.get("concat", 0.0),
+                _probe.get("sleep", 0.0),
+                n_ep,
+                _m("generate_sequences/mean"),
+                _m("buffer_pop/mean"),
+                _m("tokenize/mean"),
+                _m("detokenize/mean"),
+                _m("env_reset/mean"),
+                _m("env_step/mean"),
+                _m("generate_sequences/sum"),
+                _m("generate_sequences/sum") / max(_probe.get("dispatch_and_run", 0.0), 1e-9),
+            ),
+            flush=True,
+        )
+
+
         infos = [output.meta_info.pop("infos") for output in outputs]
         env_infos = self._env_metrics(infos)
 
@@ -987,7 +1110,7 @@ class AgentLoopManager:
                 
         return env_infos
 
-    def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:
+    def _performance_metrics(self, metrics, output: DataProto) -> dict[str, float]:
         timing = {}
         t_generate_sequences = np.array([metric["generate_sequences"] for chunk in metrics for metric in chunk])
         t_tool_calls = np.array([metric["tool_calls"] for chunk in metrics for metric in chunk])
@@ -997,6 +1120,29 @@ class AgentLoopManager:
         timing["agent_loop/tool_calls/min"] = t_tool_calls.min()
         timing["agent_loop/tool_calls/max"] = t_tool_calls.max()
         timing["agent_loop/tool_calls/mean"] = t_tool_calls.mean()
+
+        # PROBE: surface every other per-episode timer the agent loop recorded
+        # (buffer_pop / env_reset / tokenize / detokenize / env_step / ...) so the
+        # rollout breakdown is visible without editing this function again.
+        # `sum` is the one that matters for attribution: mean hides how much total
+        # wall-clock a phase consumed across all episodes in the step.
+        probe_keys = {k for chunk in metrics for metric in chunk for k in metric} - {
+            "generate_sequences",
+            "tool_calls",
+        }
+        # Keep this terse: the console metric line is truncated at ~4096 chars, and
+        # emitting mean/max/sum for every probe key pushed timing_s/step and the
+        # update timings off the end of the line.
+        for key in sorted(probe_keys):
+            vals = np.array(
+                [metric[key] for chunk in metrics for metric in chunk if key in metric]
+            )
+            if vals.size == 0:
+                continue
+            timing[f"agent_loop/{key}/mean"] = vals.mean()
+        # total episode-level LLM time, for comparison against timing_s/gen: the gap
+        # between them is orchestration overhead (Ray dispatch, postprocess, concat).
+        timing["agent_loop/generate_sequences/sum"] = t_generate_sequences.sum()
 
         # batch sequence generation is bounded by the slowest sample
         slowest = np.argmax(t_generate_sequences + t_tool_calls)
