@@ -53,6 +53,10 @@ FORWARD_BATCH_SIZE=$((4 * MICRO_BATCH_SIZE))
 # TRADEOFF: half the gradient steps per sample. Wall-clock per step is not
 # time-to-quality -- validate against the exploitability curve before trusting it.
 PPO_EPOCHS=1
+# critic_warmup: 40 -> 20. The value head converges by ~step 19 in both the
+# historical run and a fresh one (vf_explained_var -16.3 -> ~0.01, vf_loss
+# 0.30 -> 0.02, then flat), so the second 20 steps were pure cost (~79 s each,
+# the actor is frozen during warmup).
 
 # ---- throughput settings (benchmarked 2026-08-07: 583 s/step -> 262 s/step) ----
 # Only the OPTIMIZER state is kept off-GPU-offload; offloading it ran Adam on the
@@ -113,7 +117,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=True \
     algorithm.kl_ctrl.kl_coef=0.1 \
     trainer.balance_batch=True \
-    trainer.critic_warmup=40 \
+    trainer.critic_warmup=20 \
     trainer.critic_warmup_batch_repeat_times=1 \
     trainer.critic_warmup_batch_divide_ratio=1 \
     trainer.logger='["console","wandb"]' \
